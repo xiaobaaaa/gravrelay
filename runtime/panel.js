@@ -82,11 +82,18 @@
       background: var(--background, Canvas); box-shadow: 0 18px 70px #0007; overflow: auto; }
     dialog::backdrop { background: #0007; }
     label { font-size: 13px; font-weight: 520; }
-    .sources { padding: 12px; }
-    .folder-list { max-height: 155px; overflow: auto; }
-    .folder-list button { display: block; text-align: left; width: 100%; border: 0; }
-    .paths { font-size: 12px; overflow-wrap: anywhere; }
-    .paths .row { margin: 4px 0; }
+    .ssh-folder-picker { display:grid;gap:12px;background:var(--card,var(--background,Canvas)); }
+    .ssh-folder-picker:not([open]) { display:none; }
+    .ssh-folder-picker h2 { margin-bottom:0; }
+    .ssh-folder-picker .grow { min-width:0; }
+    .folder-list { min-height:140px;max-height:min(280px,36vh);overflow:auto;border:1px solid color-mix(in srgb,currentColor 16%,transparent);border-radius:8px;padding:4px; }
+    .folder-list .ssh-folder-row { display:flex;align-items:center;gap:8px;text-align:left;width:100%;border:0; }
+    .ssh-folder-actions { justify-content:flex-end; }
+    .ssh-primary { background:var(--primary,CanvasText);color:var(--primary-foreground,Canvas); }
+    .ssh-primary:hover:not(:disabled) { background:var(--primary,CanvasText);filter:brightness(.92); }
+    .ssh-host-form { display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:12px 0; }
+    .ssh-host-form label { display:grid;gap:5px; }
+    .ssh-host-form .row { grid-column:1/-1; }
     .ssh-project { margin: 2px 0; }
     .ssh-project-header { display:flex;align-items:center;gap:4px;min-height:30px;padding:0 7px; }
     .ssh-project-header button, .ssh-conversation, .ssh-show-more { border:0;background:transparent;text-align:left; }
@@ -151,6 +158,36 @@
     addRow.hidden = true;
     const select = node("select");
     select.setAttribute("aria-label", "SSH host");
+    const manual = node("div", "", "ssh-host-form");
+    manual.hidden = true;
+    function field(label, placeholder = "") {
+      const wrap = node("label", label);
+      const input = node("input");
+      input.placeholder = placeholder;
+      input.setAttribute("aria-label", label);
+      wrap.append(input);
+      manual.append(wrap);
+      return input;
+    }
+    const alias = field("Name", "workstation");
+    const hostname = field("Hostname", "linux.example.org");
+    const username = field("Username");
+    const port = field("Port");
+    port.type = "number";
+    port.min = "1";
+    port.max = "65535";
+    port.value = "22";
+    const manualActions = node("div", "", "row");
+    manualActions.append(button("Add and Connect", control => act(status, async () => {
+      await request("addManualHost", {
+        host: alias.value.trim(), hostname: hostname.value.trim(),
+        username: username.value.trim(), port: Number(port.value || "22"),
+      });
+      manual.hidden = true;
+      addRow.hidden = true;
+      await refresh();
+    }, control), "ssh-primary"), button("Cancel", () => { manual.hidden = true; }));
+    manual.append(manualActions);
     const add = button("Add", control => act(status, async () => {
       const aliases = await request("aliases");
       select.replaceChildren();
@@ -159,17 +196,23 @@
         option.value = name;
         select.append(option);
       }
-      addRow.hidden = !aliases.length;
-      status.textContent = aliases.length ? "" : "All configured SSH hosts have been added.";
+      addRow.hidden = false;
+      select.hidden = !aliases.length;
+      fromConfig.hidden = !aliases.length;
+      status.textContent = "";
     }, control));
-    addRow.append(select, button("Connect", control => act(status, async () => {
+    const fromConfig = button("Use SSH Config", control => act(status, async () => {
       if (!select.value) return;
       await request("addHost", { host: select.value });
       addRow.hidden = true;
       await refresh();
-    }, control)), button("Cancel", () => { addRow.hidden = true; }));
+    }, control));
+    addRow.append(select, fromConfig, button("Add Manually", () => {
+      manual.hidden = false;
+      alias.focus();
+    }), button("Cancel", () => { addRow.hidden = true; manual.hidden = true; }));
     top.append(node("strong", "SSH connections from this Mac"), add);
-    content.append(node("h2", "Connections"), node("p", "Connect to or disconnect from SSH hosts."), top, addRow, records, status);
+    content.append(node("h2", "Connections"), node("p", "Connect to or disconnect from SSH hosts."), top, addRow, manual, records, status);
     root.append(content);
 
     return {
@@ -522,7 +565,152 @@
     }
   }
 
-  let projectMenu;
+  let projectMenu, folderPicker;
+  const connectedHosts = () => (snapshot?.hosts || []).filter(record => record.status === "connected");
+
+  function openFolderPicker(plus) {
+    if (folderPicker) return;
+    const { host, root } = surface();
+    const dialog = node("dialog", "", "ssh-folder-picker");
+    dialog.setAttribute("aria-label", "Select SSH Folder");
+    const title = node("h2", "Select SSH Folder");
+    const hostSelect = node("select");
+    hostSelect.setAttribute("aria-label", "SSH host");
+    const pathInput = node("input", "", "grow");
+    pathInput.setAttribute("aria-label", "Remote folder");
+    pathInput.placeholder = "/path/to/project";
+    const directories = node("div", "", "folder-list");
+    directories.setAttribute("role", "group");
+    directories.setAttribute("aria-label", "Remote folders");
+    const status = node("div", "", "status");
+    status.setAttribute("role", "status");
+    const toolbar = node("div", "", "row");
+    const footer = node("div", "", "row ssh-folder-actions");
+    let activeHost = "", currentFolder = null, sequence = 0, creating = false;
+
+    const cancel = button("Cancel", () => dialog.close());
+    const select = button("Select Folder", async () => {
+      if (!currentFolder || creating) return;
+      const chosenHost = activeHost;
+      const chosenPath = currentFolder;
+      creating = true;
+      setControls();
+      status.textContent = "Creating project…";
+      try {
+        const result = await request("create", {
+          host: chosenHost, name: chosenPath.split("/").filter(Boolean).at(-1) || chosenHost,
+          folders: [chosenPath],
+        });
+        await refresh();
+        if (folderPicker?.dialog !== dialog) return;
+        if (!result.workspace) {
+          status.textContent = result.message;
+          return;
+        }
+        showWorkspace(result);
+        dialog.close();
+      } catch (error) {
+        status.textContent = error.message;
+      } finally {
+        creating = false;
+        setControls();
+      }
+    }, "ssh-primary");
+    const parent = button("Up", () => {
+      if (currentFolder && currentFolder !== "/") {
+        void browseFolder(currentFolder.split("/").slice(0, -1).join("/") || "/");
+      }
+    });
+    const go = button("Go", () => browseFolder(pathInput.value.trim()));
+
+    function setControls() {
+      hostSelect.disabled = creating || !hostSelect.options.length;
+      pathInput.disabled = creating || !activeHost;
+      parent.disabled = creating || !currentFolder || currentFolder === "/";
+      go.disabled = creating || !activeHost;
+      select.disabled = creating || !currentFolder || pathInput.value !== currentFolder;
+      cancel.disabled = creating;
+      directories.inert = creating;
+    }
+
+    async function browseFolder(directory) {
+      if (!activeHost || creating || !directory) return;
+      const requestNumber = ++sequence;
+      currentFolder = null;
+      setControls();
+      directories.replaceChildren();
+      status.textContent = "Loading folders…";
+      try {
+        const listing = await request("browse", { host: activeHost, path: directory });
+        if (requestNumber !== sequence || folderPicker?.dialog !== dialog) return;
+        currentFolder = listing.path;
+        pathInput.value = listing.path;
+        for (const name of listing.children) {
+          const item = button("", () => browseFolder(listing.path.replace(/\/$/, "") + "/" + name), "ssh-folder-row");
+          item.append(sourceIcon(activeHost, true), node("span", name));
+          directories.append(item);
+        }
+        status.textContent = listing.children.length ? "" : "No subfolders";
+      } catch (error) {
+        if (requestNumber === sequence) status.textContent = error.message;
+      } finally {
+        if (requestNumber === sequence) setControls();
+      }
+    }
+
+    function drawHosts() {
+      const hosts = connectedHosts();
+      const values = Array.from(hostSelect.options, option => option.value);
+      if (values.length !== hosts.length || values.some((value, index) => value !== hosts[index].host)) {
+        hostSelect.replaceChildren();
+        for (const record of hosts) {
+          const option = node("option", record.host);
+          option.value = record.host;
+          hostSelect.append(option);
+        }
+      }
+      const next = hosts.some(record => record.host === activeHost) ? activeHost : hosts[0]?.host || "";
+      hostSelect.value = next;
+      if (next !== activeHost) {
+        sequence++;
+        activeHost = next;
+        currentFolder = null;
+        pathInput.value = "";
+        directories.replaceChildren();
+        if (activeHost) void browseFolder("~");
+      }
+      if (!activeHost) status.textContent = "Connect an SSH host in Settings → Connections.";
+      setControls();
+    }
+
+    pathInput.addEventListener("input", setControls);
+    hostSelect.addEventListener("change", () => {
+      activeHost = hostSelect.value;
+      void browseFolder("~");
+    });
+    pathInput.addEventListener("keydown", event => {
+      if (event.key === "Enter" && event.isTrusted) {
+        event.preventDefault();
+        void browseFolder(pathInput.value.trim());
+      }
+    });
+    toolbar.append(parent, pathInput, go);
+    footer.append(cancel, select);
+    dialog.append(title, hostSelect, toolbar, directories, status, footer);
+    root.append(dialog);
+    document.body.append(host);
+    folderPicker = { dialog, drawHosts };
+    dialog.addEventListener("cancel", event => { if (creating) event.preventDefault(); });
+    dialog.addEventListener("close", () => {
+      sequence++;
+      host.remove();
+      folderPicker = null;
+      plus?.focus();
+    }, { once: true });
+    dialog.showModal();
+    drawHosts();
+  }
+
   function mountProjectMenu() {
     const plus = document.querySelector(plusSelector);
     const id = plus?.getAttribute("aria-controls");
@@ -538,71 +726,25 @@
 
     const extension = node("div");
     extension.setAttribute("data-agy-ssh-menu", "");
+    const item = button("", () => {
+      native.dispatchEvent(new KeyboardEvent("keydown", {
+        key: "Escape", code: "Escape", bubbles: true, cancelable: true,
+      }));
+      openFolderPicker(plus);
+    }, exemplar.className);
+    const icon = exemplar.querySelector("svg")?.cloneNode(true) ?? sourceIcon("", true);
+    icon.setAttribute("aria-hidden", "true");
+    item.append(icon, node("span", "New SSH Project"));
+    extension.append(item);
     native.append(extension);
-    const status = node("div", "", "px-2 text-xs text-muted-foreground");
-    status.setAttribute("role", "status");
-    const actions = node("div");
-    extension.append(actions, status);
-    const item = (label, callback) => button(label, callback, exemplar.className);
-    const menu = { native, extension, browsing: false };
-    projectMenu = menu;
-
-    const close = () => native.dispatchEvent(new KeyboardEvent("keydown", {
-      key: "Escape", code: "Escape", bubbles: true, cancelable: true,
-    }));
-
-    async function browseFolder(host, directory) {
-      menu.browsing = true;
-      actions.replaceChildren(item("Back", () => { menu.browsing = false; draw(); }));
-      status.textContent = "Loading folders…";
-      try {
-        const listing = await request("browse", { host, path: directory });
-        if (projectMenu !== menu || !menu.browsing) return;
-        status.textContent = "";
-        const path = node("input", "", "w-full px-2 py-1 text-sm rounded-md border border-border bg-background");
-        path.value = listing.path;
-        path.setAttribute("aria-label", "Remote folder");
-        path.addEventListener("keydown", event => {
-          if (event.key === "Enter" && event.isTrusted) {
-            event.preventDefault();
-            event.stopPropagation();
-            void browseFolder(host, path.value.trim());
-          }
-        });
-        const directories = node("div");
-        directories.style.cssText = "max-height:150px;overflow:auto";
-        if (listing.path !== "/") {
-          directories.append(item("Parent Folder", () => browseFolder(host, listing.path.split("/").slice(0, -1).join("/") || "/")));
-        }
-        for (const name of listing.children) {
-          directories.append(item(name, () => browseFolder(host, listing.path.replace(/\/$/, "") + "/" + name)));
-        }
-        const open = item("Open This Folder", control => act(status, async () => {
-          status.textContent = "Opening SSH project…";
-          const result = await request("create", {
-            host, name: listing.path.split("/").filter(Boolean).at(-1) || host, folders: [listing.path],
-          });
-          await refresh();
-          if (!result.workspace) { status.textContent = result.message; return; }
-          showWorkspace(result);
-          close();
-        }, control));
-        actions.append(path, directories, open);
-      } catch (error) { status.textContent = error.message; }
-    }
-
-    function draw() {
-      if (menu.browsing || !extension.isConnected) return;
-      actions.replaceChildren();
-      for (const record of snapshot?.hosts || []) {
-        if (record.status === "connected") {
-          actions.append(item("Open Folder on " + record.host + "…", () => browseFolder(record.host, "~")));
-        }
-      }
-      status.textContent = "";
-    }
-    menu.draw = draw;
-    draw();
+    projectMenu = {
+      native, extension,
+      draw() {
+        item.disabled = connectedHosts().length === 0;
+        item.title = item.disabled ? "Connect an SSH host in Settings → Connections." : "";
+      },
+    };
+    projectMenu.draw();
     refresh().catch(() => {});
   }
 
@@ -613,6 +755,7 @@
     settings?.view.draw();
     drawSidebar();
     projectMenu?.draw();
+    folderPicker?.drawHosts();
     warmFrames();
   }
   function mount() {
@@ -647,6 +790,7 @@
     settings?.remove();
     sidebar?.remove();
     projectMenu?.extension.remove();
+    folderPicker?.dialog.close();
     hideWorkspace();
     for (const frame of workspaceFrames.values()) frame.element.remove();
     for (const [content, position] of positionedPanes) {

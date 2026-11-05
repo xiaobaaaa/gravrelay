@@ -6,6 +6,7 @@ const path = require("node:path");
 const { createHash, randomUUID } = require("node:crypto");
 const { execFile, spawn } = require("node:child_process");
 const { promisify } = require("node:util");
+const { isIP } = require("node:net");
 
 const run = promisify(execFile);
 const compatibility = require("./compatibility.json");
@@ -18,6 +19,7 @@ const legacy = path.join(library, "Antigravity SSH Preview");
 const moduleData = path.join(library, "Antigravity SSH Settings");
 const projectFile = path.join(moduleData, "projects.json");
 const hostsFile = path.join(moduleData, "hosts.json");
+const managedSSH = path.join(moduleData, "ssh-hosts");
 const socketDirectory = path.join(os.homedir(), ".ssh/agy-settings");
 const connector = path.join(__dirname, "connect.py");
 const devtoolsFile = path.join(library, "Antigravity/DevToolsActivePort");
@@ -108,6 +110,50 @@ function socketFor(host) {
   return file;
 }
 
+function sshConfigFor(host) {
+  const file = path.join(managedSSH, host + ".conf");
+  if (!fs.existsSync(file)) return [];
+  const info = fs.lstatSync(file);
+  if (!info.isFile() || info.uid !== process.getuid() || (info.mode & 0o077)) {
+    throw new UserFacingError("The managed SSH configuration must be a private file.");
+  }
+  return ["-F", file];
+}
+
+async function addManualHost(message) {
+  const { host, hostname, username, port } = message;
+  if (typeof host !== "string" || !alias.test(host) ||
+      typeof hostname !== "string" || hostname.length > 253 ||
+      !(isIP(hostname) || /^[A-Za-z0-9][A-Za-z0-9.-]*$/.test(hostname)) ||
+      typeof username !== "string" || !/^[A-Za-z0-9_.@-]{1,64}$/.test(username) ||
+      !Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new UserFacingError("Enter a valid name, hostname, username and port.");
+  }
+  if (configuredHosts().some(item => item.host === host) || (await availableAliases()).includes(host)) {
+    throw new UserFacingError("This SSH host name is already in use.");
+  }
+  fs.mkdirSync(managedSSH, { recursive: true, mode: 0o700 });
+  const directory = fs.lstatSync(managedSSH);
+  if (!directory.isDirectory() || directory.uid !== process.getuid() || (directory.mode & 0o077)) {
+    throw new UserFacingError("The managed SSH configuration directory must be private.");
+  }
+  const file = path.join(managedSSH, host + ".conf");
+  const contents = [
+    "Host " + host, "  HostName " + hostname, "  User " + username, "  Port " + port, "",
+  ].join("\n");
+  fs.writeFileSync(file, contents, { flag: "wx", mode: 0o600 });
+  const next = [...configuredHosts(), { host, enabled: true }];
+  try {
+    persist(hostsFile, { hosts: next });
+  } catch (error) {
+    fs.unlinkSync(file);
+    throw error;
+  }
+  savedHosts = next;
+  void connectHost(host);
+  return {};
+}
+
 const ssh = "/usr/bin/ssh";
 const sshOptions = ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
   "-o", "ConnectTimeout=8", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3",
@@ -116,7 +162,7 @@ const sshOptions = ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
 
 async function checkMaster(host) {
   try {
-    await run(ssh, ["-S", socketFor(host), "-O", "check", host], { timeout: 2000 });
+    await run(ssh, [...sshConfigFor(host), "-S", socketFor(host), "-O", "check", host], { timeout: 2000 });
     return true;
   } catch { return false; }
 }
@@ -137,7 +183,7 @@ async function connectHost(host) {
   try {
     if (!(await checkMaster(host))) {
       if (masters.get(host) !== state || stop) return;
-      state.child = spawn(ssh, [...sshOptions, "-M", "-N", "-S", socketFor(host),
+      state.child = spawn(ssh, [...sshConfigFor(host), ...sshOptions, "-M", "-N", "-S", socketFor(host),
         "-o", "ControlPersist=no", host], { stdio: "ignore" });
       state.child.once("error", () => {
         if (masters.get(host) === state) markDisconnected(state);
@@ -169,7 +215,7 @@ async function disconnectHost(host) {
   const state = masters.get(host);
   masters.delete(host);
   if (state?.child && state.child.exitCode === null) state.child.kill();
-  try { await run(ssh, ["-S", socketFor(host), "-O", "exit", host], { timeout: 1800 }); }
+  try { await run(ssh, [...sshConfigFor(host), "-S", socketFor(host), "-O", "exit", host], { timeout: 1800 }); }
   catch {}
 }
 
@@ -202,7 +248,7 @@ async function browse(host, directory) {
     "print(json.dumps({'path':p,'children':children[:400]}))";
   const quote = value => "'" + value.replace(/'/g, "'\\''") + "'";
   try {
-    const { stdout } = await run(ssh, [...sshOptions, "-T", "-S", socketFor(host),
+    const { stdout } = await run(ssh, [...sshConfigFor(host), ...sshOptions, "-T", "-S", socketFor(host),
       "-o", "ControlMaster=no", "-o", "ProxyCommand=/usr/bin/false", host,
       "python3 -c " + quote(script) + " " + quote(directory)], { timeout: 12000, maxBuffer: 512 * 1024 });
     const result = JSON.parse(stdout);
@@ -375,6 +421,7 @@ async function dispatch(message) {
   if (action === "aliases") {
     return (await availableAliases()).filter(name => !records.some(item => item.host === name));
   }
+  if (action === "addManualHost") return addManualHost(message);
   if (action === "addHost") {
     if (typeof host !== "string" || !alias.test(host) || !(await availableAliases()).includes(host)) {
       throw new UserFacingError("Select a host from the SSH configuration.");
@@ -510,7 +557,8 @@ async function styleWorkspaceFrame(url, parentOrigins) {
       const style = document.createElement("style");
       style.id = "agy-embedded-workspace-style";
       style.textContent = '[data-testid="sidebar-split"] > :has([role="navigation"]), ' +
-        '[data-testid="sidebar-split"] > :has([role="navigation"]) + :not(:last-child) { display:none!important }';
+        '[data-testid="sidebar-split"] > :has([role="navigation"]) + :not(:last-child), ' +
+        '[data-testid="sidebar-split"] ~ .absolute.left-0.top-0:has([data-testid="sidebar-toggle"]) { display:none!important }';
       document.head.append(style);
       globalThis.__agyEmbeddedSidebarHandled = true;
       const parents = new Set(${JSON.stringify(parentOrigins)});
@@ -536,15 +584,6 @@ async function styleWorkspaceFrame(url, parentOrigins) {
         const observer = new MutationObserver(() => { if (announce()) observer.disconnect(); });
         observer.observe(document.documentElement, {childList:true,subtree:true});
       }
-      document.addEventListener("click", event => {
-        if (!event.isTrusted || !style.isConnected || !event.target.closest?.('[aria-label="Toggle Sidebar"]')) return;
-        const expanded = document.querySelector('[data-testid="sidebar-split"] [role="navigation"]');
-        style.remove();
-        if (expanded?.getClientRects().length) {
-          event.preventDefault();
-          event.stopImmediatePropagation();
-        }
-      }, true);
       return true;
     })()` });
     return result.result.value === true;
@@ -705,6 +744,6 @@ async function main() {
 
 for (const signal of ["SIGTERM", "SIGINT"]) process.on(signal, () => { stop = true; });
 main().catch(() => {
-  console.error("Antigravity SSH Bridge could not start. Run the installer with the doctor command.");
+  console.error("GravRelay could not start. Run the installer with the doctor command.");
   process.exitCode = 1;
 });

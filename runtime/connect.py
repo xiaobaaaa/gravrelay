@@ -6,6 +6,7 @@ import base64
 import hashlib
 import glob
 import ssl
+import stat
 import fcntl
 import json
 import os
@@ -84,8 +85,19 @@ def ssh_hosts():
     return sorted(hosts, key=str.casefold)
 
 
+def managed_ssh_config(host):
+    path = Path.home() / 'Library/Application Support/Antigravity SSH Settings/ssh-hosts' / (host + '.conf')
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return []
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+        raise RuntimeError('The managed SSH configuration must be a private file.')
+    return ['-F', str(path)]
+
+
 def remote(host, command, timeout=12):
-    result = subprocess.run([*SSH_COMMAND, host, command], text=True, capture_output=True,
+    result = subprocess.run([*SSH_COMMAND, *managed_ssh_config(host), host, command], text=True, capture_output=True,
                             timeout=timeout)
     if result.returncode:
         raise RuntimeError(f'SSH command on {host} exited with code {result.returncode}.')
@@ -139,7 +151,7 @@ def terminate(proc):
 
 
 def forward(host, local_port, remote_port):
-    proc = subprocess.Popen([*SSH, '-N', '-o', 'ExitOnForwardFailure=yes',
+    proc = subprocess.Popen([*SSH, *managed_ssh_config(host), '-N', '-o', 'ExitOnForwardFailure=yes',
                              '-L', f'127.0.0.1:{local_port}:127.0.0.1:{remote_port}',
                              host], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     deadline = time.monotonic() + 8
@@ -175,7 +187,7 @@ def reverse_proxy(host):
     except OSError as error:
         raise RuntimeError('The configured local HTTP proxy is not reachable.') from error
     proc = subprocess.Popen(
-        [*SSH, '-v', '-N', '-o', 'ExitOnForwardFailure=yes',
+        [*SSH, *managed_ssh_config(host), '-v', '-N', '-o', 'ExitOnForwardFailure=yes',
          '-R', f'127.0.0.1:0:127.0.0.1:{PROXY_PORT}', host],
         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
     )
@@ -248,7 +260,7 @@ def session_status(host, directory, status, port=None):
 
 def connect(host, directory, probe, project_spec=None):
     effective = subprocess.check_output(
-        [*SSH, '-G', host], text=True, stderr=subprocess.DEVNULL, timeout=8,
+        [*SSH, *managed_ssh_config(host), '-G', host], text=True, stderr=subprocess.DEVNULL, timeout=8,
     )
     if re.search(r'^(localforward|remoteforward|dynamicforward) ', effective, re.M):
         raise RuntimeError('Choose an SSH host alias without extra port forwarding rules.')
@@ -279,7 +291,7 @@ def run_backend(host, directory, server, proxy_url, probe, project_spec=None):
     command = ('cd -- ' + shlex.quote(directory)
                + ' && exec flock -n -E 75 "$HOME/.local/share/antigravity-ssh-preview/connection.lock" '
                + shlex.join(['env', *env_args, *argv]))
-    backend = subprocess.Popen([*SSH_COMMAND, host, command], stdin=subprocess.PIPE,
+    backend = subprocess.Popen([*SSH_COMMAND, *managed_ssh_config(host), host, command], stdin=subprocess.PIPE,
                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                text=True, errors='replace')
     events = Queue()

@@ -1,6 +1,6 @@
-# Antigravity SSH Bridge
+# GravRelay
 
-Antigravity SSH Bridge adds SSH workspaces to the existing Antigravity Projects sidebar on macOS. Select a remote folder, then use its projects and conversations from the same app window. Enabled hosts connect automatically when the app starts and retry after a disconnection.
+GravRelay adds SSH workspaces to the existing Antigravity Projects sidebar on macOS. Select a remote folder, then use its projects and conversations from the same app window. Enabled hosts connect automatically when the app starts and retry after a disconnection.
 
 This release works with the signed Google Antigravity **2.29.0** app. It uses Antigravity's local development interface, so it is a version-specific add-on outside the official plugin system.
 
@@ -8,23 +8,31 @@ This release works with the signed Google Antigravity **2.29.0** app. It uses An
 
 You need Antigravity 2.29.0, Node.js 22 or newer, and Python 3.9 or newer on your Mac. The remote host must run Linux x86-64, including WSL. It needs Bash, Python 3, OpenSSH with local forwarding, curl, OpenSSL, iproute2, coreutils and util-linux.
 
-Download and extract the release ZIP, then run this from the extracted folder in Terminal.
+Download and extract the [release ZIP](https://github.com/xiaobaaaa/gravrelay/releases/latest), then run this from the extracted folder in Terminal.
 
 ```sh
 sh install.sh
 ```
 
-Open Antigravity. In **Settings → Connections**, select an alias from your own SSH configuration and enable it. Test the alias with `ssh your-host` before adding it, and verify its SSH host key when prompted. The bridge uses noninteractive SSH authentication. An example entry in `~/.ssh/config` is shown below.
+You can also install directly from the release tag.
 
-```sshconfig
-Host my-linux
-    HostName linux.example.org
-    User developer
+```sh
+git clone --branch v0.1.1 --depth 1 https://github.com/xiaobaaaa/gravrelay.git
+cd gravrelay
+sh install.sh
 ```
 
-Use the Projects add button to select a folder on a connected host. Saved projects and conversations load automatically after their host connects. Complete Google sign-in in your browser if the remote workspace asks for it.
+Open Antigravity and go to **Settings → Connections → Add**. Choose an alias from your own SSH config or enter a name, hostname, username and port with **Add Manually**. A new installation starts with an empty host list. The bridge uses noninteractive SSH authentication. Use Terminal to verify an unfamiliar host key before connecting.
+
+Once the host is connected, choose **Projects → New SSH Project**. Select the host and folder in the folder picker. Saved projects and conversations load automatically after their host connects. Complete Google sign-in in your browser if the remote workspace asks for it.
 
 The Linux workspace is downloaded from Google's public build storage on first use. Its hash and the workspace connection's TLS fingerprint are checked against the release manifest.
+
+## Install with an AI agent
+
+Copy this request into an AI coding agent running on your Mac.
+
+> Install GravRelay from https://github.com/xiaobaaaa/gravrelay. Read AGENTS_INSTALL.md, check my Antigravity version, install the compatible release, and run the doctor check. Keep my existing SSH configuration and workspaces.
 
 ## Options
 

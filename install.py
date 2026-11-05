@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install the Antigravity SSH Bridge for the current macOS user."""
+"""Install the GravRelay for the current macOS user."""
 import argparse
 import hashlib
 import json
@@ -17,7 +17,7 @@ import time
 ROOT = Path(__file__).resolve().parent
 SOURCE = ROOT / 'runtime'
 COMPATIBILITY = json.loads((SOURCE / 'compatibility.json').read_text())
-RELEASE = '0.1.0'
+RELEASE = '0.1.1'
 LABEL = 'local.antigravity.ssh-settings'
 RUNTIME = ('agent.cjs', 'panel.js', 'connect.py', 'switch-project.py', 'compatibility.json')
 
@@ -192,7 +192,7 @@ def install(home, domain, file, app, node, proxy_port):
                 if restored.returncode:
                     raise InstallError('The previous LaunchAgent file was restored, but launchd could not reload it.')
         raise
-    print(f'Installed Antigravity SSH Bridge {RELEASE}. Open Antigravity and go to Settings → Connections.')
+    print(f'Installed GravRelay {RELEASE}. Open Antigravity and go to Settings → Connections.')
 
 
 def parse_port(value):
