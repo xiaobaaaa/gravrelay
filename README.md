@@ -17,7 +17,7 @@ sh install.sh
 You can also install directly from the release tag.
 
 ```sh
-git clone --branch v0.1.1 --depth 1 https://github.com/xiaobaaaa/gravrelay.git
+git clone --branch v0.1.2 --depth 1 https://github.com/xiaobaaaa/gravrelay.git
 cd gravrelay
 sh install.sh
 ```
@@ -25,6 +25,8 @@ sh install.sh
 Open Antigravity and go to **Settings → Connections → Add**. Choose an alias from your own SSH config or enter a name, hostname, username and port with **Add Manually**. A new installation starts with an empty host list. The bridge uses noninteractive SSH authentication. Use Terminal to verify an unfamiliar host key before connecting.
 
 Once the host is connected, choose **Projects → New SSH Project**. Select the host and folder in the folder picker. Saved projects and conversations load automatically after their host connects. Complete Google sign-in in your browser if the remote workspace asks for it.
+
+Hover over a project or conversation for its shortcuts and options. SSH projects support copying the project name, opening Project Settings, starting a conversation, and deleting the project. SSH conversations support renaming, pinning, marking read or unread, copying details, splitting, archiving, and deleting. Use the sidebar's **Display Options → Archived Only** to restore or permanently delete an archived conversation. Deleting a project removes its conversations on the SSH host and keeps the source folder.
 
 The Linux workspace is downloaded from Google's public build storage on first use. Its hash and the workspace connection's TLS fingerprint are checked against the release manifest.
 

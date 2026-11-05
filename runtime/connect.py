@@ -258,7 +258,7 @@ def session_status(host, directory, status, port=None):
     staged.replace(profile / 'session.json')
 
 
-def connect(host, directory, probe, project_spec=None):
+def connect(host, directory, probe, project_spec=None, start_only=False):
     effective = subprocess.check_output(
         [*SSH, *managed_ssh_config(host), '-G', host], text=True, stderr=subprocess.DEVNULL, timeout=8,
     )
@@ -269,12 +269,12 @@ def connect(host, directory, probe, project_spec=None):
     try:
         server = setup_backend(host, proxy_url)
         session_status(host, directory, 'Starting SSH workspace')
-        run_backend(host, directory, server, proxy_url, probe, project_spec)
+        run_backend(host, directory, server, proxy_url, probe, project_spec, start_only)
     finally:
         terminate(proxy)
 
 
-def run_backend(host, directory, server, proxy_url, probe, project_spec=None):
+def run_backend(host, directory, server, proxy_url, probe, project_spec=None, start_only=False):
     csrf = secrets.token_urlsafe(28)
     argv = [server, '--standalone', '--override_ide_name', 'antigravity',
             '--subclient_type', 'hub', '--override_ide_version', VERSION,
@@ -340,19 +340,20 @@ def run_backend(host, directory, server, proxy_url, probe, project_spec=None):
         browser = urllib.request.build_opener(
             urllib.request.ProxyHandler({}), urllib.request.HTTPSHandler(context=context),
         )
-        project = project_spec['id'] if project_spec else str(uuid.uuid5(uuid.NAMESPACE_URL, f'ssh://{host}{directory}'))
-        projects = rpc(browser, base, csrf, 'ListProjects', {}, timeout=45)
-        if project not in projects.get('projectIds', []):
-            folders = project_spec['folders'] if project_spec else [directory]
-            name = project_spec['name'] if project_spec else f'{PurePosixPath(directory).name or "/"} · {host}'
-            rpc(browser, base, csrf, 'CreateProject', {'project': {
-                'id': project, 'name': name,
-                'projectResources': {'resources': [
-                    {'folderUri': 'file://' + urllib.parse.quote(folder)} for folder in folders
-                ]},
-            }})
-        if project not in rpc(browser, base, csrf, 'ListProjects', {}).get('projectIds', []):
-            raise RuntimeError('The remote workspace did not save the selected project.')
+        if not start_only:
+            project = project_spec['id'] if project_spec else str(uuid.uuid5(uuid.NAMESPACE_URL, f'ssh://{host}{directory}'))
+            projects = rpc(browser, base, csrf, 'ListProjects', {}, timeout=45)
+            if project not in projects.get('projectIds', []):
+                folders = project_spec['folders'] if project_spec else [directory]
+                name = project_spec['name'] if project_spec else f'{PurePosixPath(directory).name or "/"} · {host}'
+                rpc(browser, base, csrf, 'CreateProject', {'project': {
+                    'id': project, 'name': name,
+                    'projectResources': {'resources': [
+                        {'folderUri': 'file://' + urllib.parse.quote(folder)} for folder in folders
+                    ]},
+                }})
+            if project not in rpc(browser, base, csrf, 'ListProjects', {}).get('projectIds', []):
+                raise RuntimeError('The remote workspace did not save the selected project.')
         if probe:
             print(f'Registered SSH project {host} {directory}', flush=True)
             return
@@ -382,6 +383,7 @@ def main():
     parser.add_argument('--probe', action='store_true')
     parser.add_argument('--headless', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--project-spec')
+    parser.add_argument('--start-only', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.hosts:
         print(json.dumps(ssh_hosts()))
@@ -420,7 +422,7 @@ def main():
             except BlockingIOError:
                 raise RuntimeError('This host already has a connection, or a legacy preview is still running.') from None
             try:
-                connect(args.host, directory, args.probe, project_spec)
+                connect(args.host, directory, args.probe, project_spec, args.start_only)
             finally:
                 (profile / 'session.json').unlink(missing_ok=True)
     except (RuntimeError, OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError) as error:

@@ -107,6 +107,31 @@
     .ssh-conversations { padding:0 7px 2px 28px; }
     .ssh-conversation { display:flex;align-items:center;justify-content:space-between;gap:5px;width:100%;padding:5px 4px; }
     .ssh-conversation-title { overflow:hidden;text-overflow:ellipsis;white-space:nowrap; }
+    .ssh-conversation-wrap { display:flex;align-items:center;border-radius:7px;min-width:0; }
+    .ssh-conversation-wrap:hover, .ssh-conversation-wrap:focus-within { background:color-mix(in srgb,currentColor 7%,transparent); }
+    .ssh-conversation-wrap .ssh-conversation { min-width:0;flex:1; }
+    .ssh-conversation[aria-current="true"] { color:var(--foreground,CanvasText); }
+    .ssh-conversation[data-unread] .ssh-conversation-title { font-weight:650; }
+    .ssh-conversation[data-archived] .ssh-conversation-title { opacity:.7; }
+    .ssh-inline-actions { display:none;align-items:center;gap:1px;flex:none; }
+    .ssh-project-header:is(:hover,:focus-within) .ssh-inline-actions,
+    .ssh-conversation-wrap:is(:hover,:focus-within) .ssh-inline-actions { display:flex; }
+    .ssh-project-header:is(:hover,:focus-within) .location span:first-child { display:none; }
+    .ssh-conversation-wrap:is(:hover,:focus-within) .location span { display:none; }
+    button.ssh-inline-action { border:0;display:grid;place-items:center;padding:2px;width:22px;height:22px;opacity:.8; }
+    .ssh-row-menu { position:fixed;pointer-events:auto;min-width:180px;max-width:280px;max-height:calc(100vh - 10px);overflow:auto;
+      padding:4px;border:1px solid color-mix(in srgb,currentColor 12%,transparent);border-radius:10px;
+      background:var(--popover,var(--card,Canvas));color:var(--popover-foreground,var(--foreground,CanvasText));
+      box-shadow:0 9px 24px #0004; }
+    button.ssh-menu-item { display:flex;align-items:center;width:100%;gap:8px;padding:6px 8px;
+      text-align:left;border:0;font-size:13px;line-height:18px; }
+    .ssh-menu-item:focus-visible { outline:1px solid currentColor;outline-offset:-2px; }
+    .ssh-menu-item svg { opacity:.82;flex:none; }
+    .ssh-menu-arrow { margin-left:8px;opacity:.65; }
+    .ssh-menu-separator { height:1px;margin:4px -4px;background:color-mix(in srgb,currentColor 12%,transparent); }
+    .ssh-action-dialog { width:min(450px,calc(100vw - 40px)); }
+    .ssh-danger { background:var(--destructive,#b8373e);color:var(--destructive-foreground,white); }
+    .ssh-danger:hover:not(:disabled) { background:var(--destructive,#b8373e);filter:brightness(.91); }
     .ssh-empty { font-size:12px;opacity:.55;padding:5px 4px; }
     .ssh-show-more { display:block; }
     button[aria-current="true"] { background:color-mix(in srgb,currentColor 10%,transparent); }
@@ -323,6 +348,7 @@
     heading.after(host);
     sidebar = {
       heading, host, rows,
+      isArchived() { return /\(Archived\)/i.test(heading.textContent); },
       updateVisibility() {
         host.hidden = heading.getAttribute("data-collapsed") === "true" ||
           !snapshot?.projects?.some(project => project.host !== remoteHost);
@@ -367,12 +393,281 @@
     return Math.floor(seconds / 86400) + "d";
   }
 
+  const actionPaths = {
+    more: "M12 5h.01M12 12h.01M12 19h.01",
+    add: "M12 5v14m-7-7h14",
+    copy: "M8 7V4h12v13h-3M4 7h12v13H4z",
+    settings: "M9 3h6l1 4 4 1v7l-4 1-1 4H9l-1-4-4-1V8l4-1zM14.5 12a2.5 2.5 0 1 0-5 0 2.5 2.5 0 1 0 5 0",
+    delete: "M4 6h16m-13 0 1 14h8l1-14M9 6V3h6v3m-5 4v6m4-6v6",
+    rename: "m4 16-1 5 5-1L21 7l-4-4zM14 6l4 4",
+    pin: "M8 4h8m-7 0v7l-3 4h12l-3-4V4m-3 11v6",
+    unread: "M15 4H4v15l4-4h12V9m1-4h.01",
+    split: "M3 4h18v16H3zM12 4v16",
+    archive: "M4 9h16v11H4zM3 4h18v5H3zm6 9 3 3 3-3",
+    restore: "M4 9h16v11H4zM3 4h18v5H3zm6 6 3-3 3 3",
+    stop: "M3 12a9 9 0 1 0 18 0 9 9 0 1 0-18 0m6-3h6v6H9z",
+  };
+  function actionIcon(key) {
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("width", "16");
+    svg.setAttribute("height", "16");
+    svg.setAttribute("aria-hidden", "true");
+    const path = document.createElementNS(svg.namespaceURI, "path");
+    for (const [name, value] of Object.entries({ d: actionPaths[key], fill: "none", stroke: "currentColor",
+      "stroke-width": key === "more" ? "3.4" : "1.7", "stroke-linecap": "round", "stroke-linejoin": "round" })) path.setAttribute(name, value);
+    svg.append(path);
+    return svg;
+  }
+
+  function iconButton(label, icon, action, menu = false) {
+    const control = button("", action, "ssh-inline-action");
+    control.title = label;
+    control.setAttribute("aria-label", label);
+    if (menu) control.setAttribute("aria-haspopup", "menu");
+    control.append(actionIcon(icon));
+    return control;
+  }
+
+  let rowMenu, actionDialog;
+  function closeRowMenu(restore = false) {
+    const menu = rowMenu;
+    rowMenu = null;
+    menu?.host.remove();
+    menu?.anchor?.setAttribute("aria-expanded", "false");
+    if (restore && menu?.anchor?.isConnected) menu.anchor.focus();
+  }
+
+  function showRowMenu(anchor, items, point) {
+    if (rowMenu?.anchor === anchor && !point) { closeRowMenu(true); return; }
+    closeRowMenu();
+    const { host, root } = surface();
+    host.setAttribute("data-agy-ssh-actions", "");
+    host.style.cssText = "position:fixed;inset:0;pointer-events:none;z-index:2147483000;font:inherit;color:inherit";
+    document.body.append(host);
+    rowMenu = { host, anchor };
+    anchor.setAttribute("aria-expanded", "true");
+    const box = anchor.getBoundingClientRect();
+    let submenu, trigger;
+    function populate(specs) {
+      const menu = node("div", "", "ssh-row-menu");
+      menu.setAttribute("role", "menu");
+      for (const spec of specs) {
+        if (!spec) {
+          const separator = node("div", "", "ssh-menu-separator");
+          separator.setAttribute("role", "separator");
+          menu.append(separator);
+          continue;
+        }
+        const item = button("", el => {
+          if (spec.items) { openSub(el, spec.items, true); return; }
+          closeRowMenu();
+          Promise.resolve().then(spec.action).catch(error => showActionError(error));
+        }, "ssh-menu-item");
+        item.disabled = Boolean(spec.disabled);
+        item.setAttribute("role", "menuitem");
+        if (spec.icon) item.append(actionIcon(spec.icon));
+        item.append(node("span", spec.label, "grow"));
+        if (spec.items) {
+          item.setAttribute("aria-haspopup", "menu");
+          item.append(node("span", "›", "ssh-menu-arrow"));
+        }
+        item.addEventListener("pointerenter", () => {
+          if (menu !== main) return;
+          if (spec.items && !item.disabled) openSub(item, spec.items);
+          else closeSub();
+        });
+        item.addEventListener("keydown", event => {
+          if (event.key === "ArrowRight" && spec.items) { event.preventDefault(); openSub(item, spec.items, true); }
+        });
+        menu.append(item);
+      }
+      menu.addEventListener("keydown", event => {
+        if (!["ArrowDown", "ArrowUp", "Home", "End", "ArrowLeft", "Escape", "Tab"].includes(event.key)) return;
+        if (event.key === "Tab") { closeRowMenu(true); return; }
+        event.preventDefault();
+        event.stopPropagation();
+        if (event.key === "Escape") { closeRowMenu(true); return; }
+        if (event.key === "ArrowLeft") { const origin = trigger; closeSub(); origin?.focus(); return; }
+        const candidates = [...menu.querySelectorAll("button:not(:disabled)")];
+        const current = candidates.indexOf(root.activeElement);
+        const next = event.key === "Home" ? 0 : event.key === "End" ? candidates.length - 1 :
+          (current + (event.key === "ArrowDown" ? 1 : -1) + candidates.length) % candidates.length;
+        candidates[next]?.focus();
+      });
+      root.append(menu);
+      return menu;
+    }
+    function place(menu, x, y) {
+      const width = menu.offsetWidth, height = menu.offsetHeight;
+      menu.style.left = Math.max(5, Math.min(x, innerWidth - width - 5)) + "px";
+      menu.style.top = Math.max(5, Math.min(y, innerHeight - height - 5)) + "px";
+    }
+    function closeSub() { submenu?.remove(); submenu = null; trigger?.setAttribute("aria-expanded", "false"); trigger = null; }
+    function openSub(item, specs, focus = false) {
+      if (trigger !== item) {
+        closeSub();
+        trigger = item;
+        item.setAttribute("aria-expanded", "true");
+        submenu = populate(specs);
+        const bounds = item.getBoundingClientRect();
+        place(submenu, bounds.right + submenu.offsetWidth + 7 < innerWidth ? bounds.right : bounds.left - submenu.offsetWidth, bounds.top);
+      }
+      if (focus) submenu.querySelector("button:not(:disabled)")?.focus();
+    }
+    const main = populate(items);
+    const y = point?.y ?? box.bottom + 3;
+    place(main, point?.x ?? box.left, y + main.offsetHeight < innerHeight ? y : (point?.y ?? box.top) - main.offsetHeight - 3);
+    main.querySelector("button:not(:disabled)")?.focus({ preventScroll: true });
+  }
+
+  function closeActionsOutside(event) {
+    if (!rowMenu) return;
+    const path = event.composedPath();
+    if (!path.includes(rowMenu.host) && !path.includes(sidebar?.host)) closeRowMenu();
+  }
+
+  function actionPrompt({ title, message, label, value, danger, submit }) {
+    if (actionDialog) return;
+    const { host, root } = surface();
+    host.setAttribute("data-agy-ssh-actions", "");
+    const dialog = node("dialog", "", "ssh-folder-picker ssh-action-dialog");
+    dialog.setAttribute("aria-label", title);
+    const form = node("form", "", "stack");
+    const status = node("p", "", "status");
+    status.setAttribute("role", "alert");
+    const heading = node("h2", title);
+    form.append(heading);
+    if (message) form.append(node("p", message));
+    let input;
+    if (value !== undefined) {
+      input = node("input");
+      input.setAttribute("aria-label", "Conversation name");
+      input.maxLength = 180;
+      input.required = true;
+      input.value = value;
+      form.append(input);
+    }
+    const actions = node("div", "", "row ssh-folder-actions");
+    if (submit) actions.append(button("Cancel", () => dialog.close()));
+    const confirm = node("button", label ?? "Close", danger ? "ssh-danger" : "ssh-primary");
+    confirm.type = "submit";
+    actions.append(confirm);
+    form.append(status, actions);
+    form.addEventListener("submit", async event => {
+      event.preventDefault();
+      if (!event.isTrusted || confirm.disabled) return;
+      if (!submit) { dialog.close(); return; }
+      confirm.disabled = true;
+      try { await submit(input?.value.trim()); dialog.close(); }
+      catch (error) { status.textContent = error.message; }
+      finally { confirm.disabled = false; }
+    });
+    dialog.append(form);
+    root.append(dialog);
+    document.body.append(host);
+    actionDialog = dialog;
+    dialog.addEventListener("close", () => { host.remove(); actionDialog = null; }, { once: true });
+    dialog.showModal();
+    if (input) { input.focus(); input.select(); }
+    else (danger ? actions.firstElementChild : confirm).focus();
+  }
+
+  function showActionError(error) {
+    actionPrompt({ title: "SSH action unavailable", message: error.message });
+  }
+
+  async function copyText(text) {
+    // Clipboard permission follows the top-level App, not the remote frame.
+    if (navigator.clipboard?.writeText) {
+      try { await navigator.clipboard.writeText(text); return; } catch {}
+    }
+    const input = node("textarea");
+    input.value = text;
+    input.style.cssText = "position:fixed;left:-10000px;top:0";
+    document.body.append(input);
+    input.select();
+    try { if (!document.execCommand("copy")) throw new Error("The name could not be copied."); }
+    finally { input.remove(); }
+  }
+
+  async function manage(project, operation, conversation, value) {
+    await request("manage", { host: project.host, project: project.id, conversation: conversation?.id, operation, value });
+    if (selection?.project === project.id &&
+        (operation === "deleteProject" || ["deleteConversation", "archive"].includes(operation) &&
+         selection.conversation === conversation?.id && value !== false)) {
+      if (operation === "deleteProject") { selection = null; hideWorkspace(); }
+      else selectSaved(project);
+    }
+    await refresh();
+  }
+
+  const item = (label, icon, action, disabled = false) => ({ label, icon, action, disabled });
+  function projectActions(project) {
+    const disabled = !project.workspace;
+    return [
+      item("Copy Project Name", "copy", () => copyText(project.name)),
+      item("Project Settings", "settings", () => selectSaved(project, null, "settings"), disabled),
+      item("Delete Project", "delete", () => actionPrompt({
+        title: "Delete Project",
+        message: 'Delete "' + project.name + '" and its conversations, including archived conversations? The SSH folder and its files will be kept.',
+        label: "Delete", danger: true, submit: () => manage(project, "deleteProject"),
+      }), !project.canManage),
+    ];
+  }
+
+  function conversationActions(project, conversation) {
+    const disabled = !project.workspace;
+    const pinned = conversation.pinned;
+    const unread = conversation.unread;
+    const archived = conversation.archived;
+    const remove = item(archived ? "Delete Permanently" : "Delete", "delete", () => actionPrompt({
+      title: "Delete Conversation", message: 'Permanently delete "' + conversation.title + '"?',
+      label: "Delete", danger: true, submit: () => manage(project, "deleteConversation", conversation),
+    }), disabled);
+    if (archived) return [
+      item("Restore", "restore", () => manage(project, "archive", conversation, false), disabled),
+      remove,
+    ];
+    const native = op => selectSaved(project, conversation.id, op);
+    const panes = workspaceFrames.get(project.host)?.panes;
+    return [
+      item("Rename", "rename", () => actionPrompt({
+        title: "Rename Conversation", value: conversation.title, label: "Save",
+        submit: value => manage(project, "rename", conversation, value),
+      }), disabled),
+      item(pinned ? "Unpin" : "Pin", "pin", () => manage(project, "pin", conversation, !pinned), disabled),
+      item(unread ? "Mark Read" : "Mark Unread", "unread", () => manage(project, "markUnread", conversation, !unread), disabled),
+      null,
+      { label: "Copy", icon: "copy", items: [
+        item("Conversation Name", null, () => copyText(conversation.title)),
+        item("Conversation ID", null, () => copyText(conversation.id)),
+        ...(conversation.workspace ? [item("Workspace Name", null, () => copyText(conversation.workspace))] : []),
+        item("Project Name", null, () => copyText(project.name)),
+      ] },
+      { label: "Split", icon: "split", disabled, items: [
+        item("Split Right", null, () => native("splitRight")),
+        item("Split Down", null, () => native("splitDown")),
+        ...(panes?.includes(conversation.id) ? [
+          item("Replace with New", null, () => native("replacePane")),
+          ...(panes.length > 1 ? [item("Remove from Split", null, () => native("removePane"))] : []),
+        ] : []),
+      ] },
+      null,
+      conversation.running ? item("Stop", "stop", () => manage(project, "stopConversation", conversation), disabled) :
+        item("Archive", "archive", () => manage(project, "archive", conversation, true), disabled),
+      remove,
+    ];
+  }
+
   function drawSidebar() {
     if (!sidebar) return;
     sidebar.updateVisibility();
+    const archived = sidebar.isArchived();
+    sidebar.archived = archived;
     const rows = document.createDocumentFragment();
     for (const project of snapshot?.projects || []) {
-      if (project.host === remoteHost) continue;
+      if (project.host === remoteHost || archived && !project.conversations?.some(row => row.archived)) continue;
       const state = snapshot.hosts.find(item => item.host === project.host)?.status;
       const collapsed = collapsedProjects.has(project.id);
       const group = node("div", "", "ssh-project");
@@ -393,11 +688,21 @@
       const location = node("span", "", "location");
       location.title = project.host + " · " + (stateLabel[state] || "Disconnected");
       location.append(node("span", project.host), node("span", "", "dot " + (state || "")));
-      header.append(toggle, select, location);
+      const controls = node("div", "", "ssh-inline-actions");
+      const options = iconButton("Project options", "more", anchor => showRowMenu(anchor, projectActions(project)), true);
+      const create = iconButton("New Conversation", "add", () => selectSaved(project, null, "new"));
+      create.disabled = !project.workspace;
+      controls.append(options, create);
+      header.addEventListener("contextmenu", event => {
+        if (!event.isTrusted) return;
+        event.preventDefault();
+        showRowMenu(options, projectActions(project), { x: event.clientX, y: event.clientY });
+      });
+      header.append(toggle, select, location, controls);
       group.append(header);
 
       if (!collapsed) {
-        const conversations = project.conversations;
+        const conversations = project.conversations?.filter(row => Boolean(row.archived) === archived);
         const list = node("div", "", "ssh-conversations");
         if (!Array.isArray(conversations) || !conversations.length) {
           list.append(node("div", Array.isArray(conversations) ? "No conversations yet"
@@ -405,7 +710,10 @@
         } else {
           const shown = expandedConversationLists.has(project.id) ? conversations : conversations.slice(0, 5);
           for (const conversation of shown) {
+            const wrap = node("div", "", "ssh-conversation-wrap");
             const entry = button("", () => selectSaved(project, conversation.id), "ssh-conversation");
+            if (conversation.unread) entry.setAttribute("data-unread", "");
+            if (conversation.archived) entry.setAttribute("data-archived", "");
             const source = node("span", "", "location");
             source.title = project.host;
             source.append(sourceIcon(project.host), node("span", formatActivity(conversation.updated)));
@@ -414,7 +722,26 @@
             if (selection?.project === project.id && selection.conversation === conversation.id) {
               entry.setAttribute("aria-current", "true");
             }
-            list.append(entry);
+            const controls = node("div", "", "ssh-inline-actions");
+            const options = iconButton("More options", "more", anchor => showRowMenu(anchor, conversationActions(project, conversation)), true);
+            const archive = iconButton(conversation.running ? "Stop Conversation" : conversation.archived ? "Restore Conversation" : "Archive Conversation",
+              conversation.running ? "stop" : conversation.archived ? "restore" : "archive",
+              () => manage(project, conversation.running ? "stopConversation" : "archive", conversation, !conversation.archived).catch(showActionError));
+            const pin = iconButton(conversation.pinned ? "Unpin Conversation" : "Pin Conversation", "pin",
+              () => manage(project, "pin", conversation, !conversation.pinned).catch(showActionError));
+            archive.disabled = pin.disabled = !project.workspace;
+            if (conversation.archived) {
+              const remove = iconButton("Delete Permanently", "delete", () => conversationActions(project, conversation)[1].action());
+              remove.disabled = !project.workspace;
+              controls.append(archive, remove, options);
+            } else controls.append(archive, pin, options);
+            wrap.addEventListener("contextmenu", event => {
+              if (!event.isTrusted) return;
+              event.preventDefault();
+              showRowMenu(options, conversationActions(project, conversation), { x: event.clientX, y: event.clientY });
+            });
+            wrap.append(entry, controls);
+            list.append(wrap);
           }
           if (shown.length < conversations.length) {
             list.append(button("Show more", () => {
@@ -463,6 +790,7 @@
       frame.origin = url.origin;
       frame.route = destination.project + ":";
       frame.ready = false;
+      frame.panes = null;
       frame.element.src = url.href;
     }
     return frame;
@@ -497,6 +825,7 @@
   function applySelection(destination, force = false) {
     if (!selection) return;
     const project = snapshot?.projects.find(item => item.id === selection.project);
+    if (snapshot && !project && !destination) { selection = null; hideWorkspace(); return; }
     const target = destination ?? project?.workspace;
     if (!target || !uuid.test(target.project) || selection.conversation && !uuid.test(selection.conversation)) return;
     const url = new URL(target.address);
@@ -512,17 +841,20 @@
     const frame = workspaceFrame(target);
     if (!frame?.ready) return;
     const route = target.project + ":" + (selection.conversation || "");
-    if (force || frame.route !== route) {
+    const operation = selection.operation;
+    if (force || operation || frame.route !== route) {
       frame.route = route;
       frame.element.contentWindow.postMessage({
-        type: "agy-ssh-select", project: target.project, conversation: selection.conversation,
+        type: "agy-ssh-select", project: target.project, conversation: selection.conversation, operation,
       }, frame.origin);
+      selection.operation = null;
     }
     revealWorkspace(frame);
   }
 
-  function selectSaved(project, conversation = null) {
-    selection = { project: project.id, conversation };
+  function selectSaved(project, conversation = null, operation = null) {
+    if (operation && !project.workspace) return;
+    selection = { project: project.id, conversation, operation };
     drawSidebar();
     applySelection(project.workspace, true);
   }
@@ -535,11 +867,17 @@
   }
 
   function receiveWorkspaceReady(event) {
-    if (event.data?.type !== "agy-ssh-ready") return;
+    if (!["agy-ssh-ready", "agy-ssh-panes", "agy-ssh-action-error"].includes(event.data?.type)) return;
     for (const frame of workspaceFrames.values()) {
       if (event.origin === frame.origin && event.source === frame.element.contentWindow) {
-        frame.ready = true;
-        applySelection();
+        if (event.data.type === "agy-ssh-ready") {
+          frame.ready = true;
+          applySelection();
+        } else if (event.data.type === "agy-ssh-panes" && Array.isArray(event.data.conversations)) {
+          frame.panes = event.data.conversations.slice(0, 30).filter(item => item === "_new" || typeof item === "string" && uuid.test(item));
+        } else if (event.data.type === "agy-ssh-action-error" && frame === displayedWorkspace) {
+          showActionError(new Error("The conversation layout is still loading. Try again."));
+        }
         return;
       }
     }
@@ -553,7 +891,7 @@
   }
 
   function openNativeProject(event) {
-    if (!selection || event.target.closest?.("[data-agy-ssh-projects], [data-agy-ssh-menu]")) return;
+    if (!selection || event.target.closest?.("[data-agy-ssh-projects], [data-agy-ssh-menu], [data-agy-ssh-actions]")) return;
     const control = event.target.closest?.('button, a, [data-sidebar-row-id], [data-sidebar-section-drop-id]');
     if (!control) return;
     if (control.matches(plusSelector)) return;
@@ -749,6 +1087,7 @@
   }
 
   document.addEventListener("click", openNativeProject, true);
+  document.addEventListener("pointerdown", closeActionsOutside, true);
   window.addEventListener("message", receiveWorkspaceReady);
 
   function render() {
@@ -776,12 +1115,13 @@
     if ((native === settings?.dialog || !native) && heading === sidebar?.heading && sidebar?.host.isConnected &&
         menu === (projectMenu?.native ?? null)) {
       sidebar.updateVisibility();
+      if (sidebar.archived !== sidebar.isArchived()) drawSidebar();
       return;
     }
     scheduled = true;
     requestAnimationFrame(mount);
   });
-  observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ["data-collapsed", "aria-expanded"] });
+  observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["data-collapsed", "aria-expanded"] });
   const tick = setInterval(() => refresh().catch(() => {}), 2600);
   globalThis.__agyConnectionsRemove = () => {
     disposed = true;
@@ -796,6 +1136,9 @@
     for (const [content, position] of positionedPanes) {
       if (content.style.position === "relative") content.style.position = position;
     }
+    closeRowMenu();
+    actionDialog?.close();
+    document.removeEventListener("pointerdown", closeActionsOutside, true);
     document.removeEventListener("click", openNativeProject, true);
     window.removeEventListener("message", receiveWorkspaceReady);
   };

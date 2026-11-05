@@ -1,9 +1,11 @@
 #!/usr/bin/python3
-"""Register a project using an existing, verified Antigravity SSH tunnel."""
+"""Manage projects and conversations through a verified Antigravity SSH tunnel."""
 import base64
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 import hashlib
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import socket
 import ssl
@@ -19,7 +21,9 @@ SERVICE = '/exa.language_server_pb.LanguageServerService/'
 port = int(sys.argv[1])
 selection = json.loads(sys.argv[2])
 syncing = 'projects' in selection
-projects = selection['projects'] if syncing else [selection]
+operation = selection.get('operation')
+projects = selection['projects'] if syncing else [] if operation else [selection]
+UUID = re.compile(r'[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}')
 probe = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
 probe.check_hostname = False
 probe.verify_mode = ssl.CERT_NONE
@@ -51,23 +55,6 @@ def rpc(name, payload):
         return json.loads(data)
 
 
-existing = set(rpc('ListProjects', {}).get('projectIds', []))
-registered = False
-for project in projects:
-    if project['id'] in existing:
-        continue
-    rpc('CreateProject', {'project': {
-        'id': project['id'], 'name': project['name'],
-        'projectResources': {'resources': [
-            {'folderUri': 'file://' + urllib.parse.quote(folder)} for folder in project['folders']
-        ]},
-    }})
-    registered = True
-if registered:
-    existing = set(rpc('ListProjects', {}).get('projectIds', []))
-if any(project['id'] not in existing for project in projects):
-    raise SystemExit('Project registration did not persist.')
-
 def initial_summaries():
     payload = b'{}'
     request = urllib.request.Request(
@@ -90,26 +77,135 @@ def initial_summaries():
         return message.get('updates', {})
 
 
-if syncing:
-    conversations = {project['id']: [] for project in projects}
-    summaries = initial_summaries()
+def project_ids():
+    response = rpc('ListProjects', {})
+    ids = response.get('projectIds', [])
+    if not isinstance(ids, list) or any(not isinstance(item, str) for item in ids):
+        raise RuntimeError('Invalid project list.')
+    return set(ids)
+
+
+def register(project):
+    rpc('CreateProject', {'project': {
+        'id': project['id'], 'name': project['name'],
+        'projectResources': {'resources': [
+            {'folderUri': 'file://' + urllib.parse.quote(folder)} for folder in project['folders']
+        ]},
+    }})
+
+
+def timestamp(value):
+    try:
+        return datetime.fromisoformat(value.replace('Z', '+00:00')).timestamp() if isinstance(value, str) else 0
+    except ValueError:
+        return 0
+
+
+def manage():
+    project_id = selection['project']
+    if not UUID.fullmatch(project_id):
+        raise ValueError('Invalid project.')
+    if operation == 'deleteProject':
+        if project_id in project_ids():
+            rpc('DeleteProject', {'id': project_id})
+        if project_id in project_ids():
+            raise RuntimeError('Project deletion did not persist.')
+        return
+    cascade_id = selection['conversation']
+    if not UUID.fullmatch(cascade_id):
+        raise ValueError('Invalid conversation.')
+    summary = initial_summaries().get(cascade_id, {})
+    metadata = summary.get('trajectoryMetadata') or {}
+    if metadata.get('projectId') != project_id or metadata.get('parentConversationId'):
+        raise ValueError('Conversation no longer belongs to this project.')
+    if operation == 'deleteConversation':
+        rpc('DeleteCascadeTrajectory', {'cascadeId': cascade_id})
+        return
+    if operation == 'stopConversation':
+        rpc('ForceStopCascadeTree', {'conversationId': cascade_id})
+        return
+    fields = {'pin': 'pinned', 'archive': 'archived', 'markUnread': 'markedAsUnread'}
+    value = selection.get('value')
+    if operation == 'rename' and isinstance(value, str) and 0 < len(value.strip()) <= 180:
+        annotations = {'title': value.strip()}
+    elif operation in fields and type(value) is bool:
+        annotations = {fields[operation]: value}
+        if operation == 'markUnread' and not value:
+            annotations['lastUserViewTime'] = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+    else:
+        raise ValueError('Unsupported conversation action.')
+    rpc('UpdateConversationAnnotations', {
+        'cascadeIds': [cascade_id], 'annotations': annotations, 'mergeAnnotations': True,
+    })
+
+
+if operation:
+    manage()
+    print('{}')
+elif syncing:
+    existing = project_ids()
+    pending = [project for project in projects if project['id'] not in existing
+               and project.get('pendingRegistration') is True]
+    for project in pending:
+        register(project)
+    if pending:
+        existing = project_ids()
+    conversations = {project['id']: [] for project in projects if project['id'] in existing}
+    def read_name(project_id):
+        try:
+            name = rpc('ReadProject', {'id': project_id}).get('project', {}).get('name')
+            return project_id, name if isinstance(name, str) and 0 < len(name) <= 120 else None
+        except (OSError, ValueError):
+            return project_id, None
+    summaries = initial_summaries() if conversations else {}
     for cascade_id, summary in summaries.items():
-        if not re.fullmatch(r'[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}', cascade_id):
+        if not UUID.fullmatch(cascade_id):
             continue
         metadata = summary.get('trajectoryMetadata') or {}
         annotations = summary.get('annotations') or {}
         project_id = metadata.get('projectId')
-        if project_id not in conversations or annotations.get('archived') or metadata.get('parentConversationId'):
+        if project_id not in conversations or metadata.get('parentConversationId'):
             continue
         title = annotations.get('title') or summary.get('summary') or 'Untitled conversation'
         title = ' '.join(title.split())[:180] if isinstance(title, str) else ''
         updated = summary.get('lastModifiedTime', '')
+        unread = not annotations.get('archived') and not summary.get('notFullyIdle') and (
+            annotations.get('markedAsUnread') is True or
+            int(timestamp(updated)) > timestamp(annotations.get('lastUserViewTime'))
+        )
+        workspace_uris = metadata.get('workspaceUris') or []
+        workspace = ''
+        if workspace_uris and isinstance(workspace_uris[0], str):
+            uri = urllib.parse.urlparse(workspace_uris[0])
+            if uri.scheme == 'file':
+                workspace = PurePosixPath(urllib.parse.unquote(uri.path)).name
         conversations[project_id].append({
             'id': cascade_id,
             'title': title or 'Untitled conversation',
             'updated': updated if isinstance(updated, str) else '',
+            'workspace': workspace,
+            'pinned': annotations.get('pinned') is True,
+            'archived': annotations.get('archived') is True,
+            'unread': unread,
+            'running': not summary.get('killed') and (
+                summary.get('status') in ('CASCADE_RUN_STATUS_RUNNING', 'CASCADE_RUN_STATUS_BUSY', 'CASCADE_RUN_STATUS_CANCELING', 2, 3, 4)
+                or summary.get('hasRunningSubagents') is True
+            ),
         })
     for project_id, rows in conversations.items():
-        rows.sort(key=lambda row: row['updated'], reverse=True)
-        conversations[project_id] = rows[:100]
-    print(json.dumps(conversations, ensure_ascii=False))
+        rows.sort(key=lambda row: (not row['archived'], row['pinned'], row['updated']), reverse=True)
+        conversations[project_id] = rows[:100] + [row for row in rows[100:] if row['archived']][:100]
+    if selection.get('catalog') is True:
+        names = {}
+        if selection.get('includeNames') is True:
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                names = {key: name for key, name in pool.map(read_name, list(conversations)[:40]) if name}
+        print(json.dumps({'conversations': conversations, 'names': names}, ensure_ascii=False))
+    else:
+        print(json.dumps(conversations, ensure_ascii=False))
+else:
+    project = selection
+    if project['id'] not in project_ids():
+        register(project)
+    if project['id'] not in project_ids():
+        raise SystemExit('Project registration did not persist.')

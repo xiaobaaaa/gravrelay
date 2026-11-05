@@ -73,6 +73,7 @@ function projects() {
         id: typeof project.id === "string" && uuid.test(project.id) ? project.id : oldProjectId(project.host, folders[0]),
         name: typeof project.name === "string" && project.name ? project.name : path.posix.basename(folders[0]) || "/",
         host: project.host, folders,
+        registered: project.registered === true, pendingRegistration: project.pendingRegistration === true,
       }];
     });
   }
@@ -315,8 +316,7 @@ async function workspacePort(project) {
   let startup = opening.get(host);
   if (!startup) {
     startup = (async () => {
-      const child = spawn(python, [connector, "--headless", "--host", host, "--directory",
-        project.folders[0], "--project-spec", JSON.stringify(project)], { detached: true, stdio: "ignore" });
+      const child = spawn(python, [connector, "--headless", "--start-only", "--host", host, "--directory", "~"], { detached: true, stdio: "ignore" });
       let exited = false;
       child.once("error", () => { exited = true; });
       child.once("exit", () => { exited = true; });
@@ -342,7 +342,7 @@ function destinationFor(project, port) {
 function workspaceState(host) {
   let state = workspaces.get(host);
   if (!state) {
-    state = { pending: false, retryAt: 0, checkedAt: 0, port: null, conversations: null, destination: null };
+    state = { pending: false, retryAt: 0, checkedAt: 0, namesAt: 0, port: null, conversations: null, destination: null };
     workspaces.set(host, state);
   }
   return state;
@@ -352,16 +352,39 @@ async function warmWorkspace(host) {
   const saved = projects().filter(project => project.host === host);
   if (!saved.length) return;
   const state = workspaceState(host);
-  if (state.pending || state.retryAt > Date.now() || Date.now() - state.checkedAt < 6000) return;
+  if (state.pending || state.mutating || state.retryAt > Date.now() || Date.now() - state.checkedAt < 6000) return;
   state.pending = true;
   try {
     const project = saved.find(item => item.id === selectedProjects.get(host)) ?? saved[0];
     const port = await workspacePort(project);
+    const includeNames = state.port !== port || Date.now() - state.namesAt >= 30000;
     const result = await run(python, [path.join(__dirname, "switch-project.py"),
-      String(port), JSON.stringify({ projects: saved })], { timeout: 18000, maxBuffer: 2 * 1024 * 1024 });
-    state.conversations = JSON.parse(result.stdout);
+      String(port), JSON.stringify({ projects: saved, catalog: true, includeNames })], { timeout: 18000, maxBuffer: 2 * 1024 * 1024 });
+    const previous = state.port === port ? state.conversations : null;
+    const catalog = JSON.parse(result.stdout);
+    if (includeNames) state.namesAt = Date.now();
+    state.conversations = catalog.conversations;
+    let changed = false;
+    savedProjects = projects().filter(item => {
+      if (item.host !== host || !saved.includes(item)) return true;
+      if (Array.isArray(state.conversations[item.id])) {
+        const name = catalog.names[item.id];
+        if (name && name !== item.name) { item.name = name; changed = true; }
+        if (!item.registered || item.pendingRegistration) {
+          item.registered = true;
+          item.pendingRegistration = false;
+          changed = true;
+        }
+        return true;
+      }
+      if (item.registered && Array.isArray(previous?.[item.id])) { changed = true; return false; }
+      return true;
+    });
+    if (changed) persist(projectFile, { projects: savedProjects });
     state.port = port;
-    state.destination = destinationFor(project, port);
+    const available = projects().filter(item => item.host === host && Array.isArray(state.conversations[item.id]));
+    const active = available.find(item => item.id === project.id) ?? available[0];
+    state.destination = active ? destinationFor(active, port) : null;
     state.checkedAt = Date.now();
   } catch {
     state.port = null;
@@ -384,6 +407,9 @@ async function openCreatedProject(project) {
   } catch {
     throw new UserFacingError("The SSH workspace could not open this project. Check the connection and folder.");
   }
+  project.registered = true;
+  project.pendingRegistration = false;
+  persist(projectFile, { projects: projects() });
   selectedProjects.set(host, project.id);
   const state = workspaceState(host);
   state.port = port;
@@ -392,6 +418,57 @@ async function openCreatedProject(project) {
   state.conversations = { ...state.conversations, [project.id]: state.conversations?.[project.id] ?? [] };
   void warmWorkspace(host);
   return { workspace: state.destination };
+}
+
+const workspaceActions = new Set(["deleteProject", "rename", "pin", "archive", "markUnread", "deleteConversation", "stopConversation"]);
+
+async function manageWorkspace(host, message) {
+  const { operation, project: id, conversation, value } = message;
+  const project = projects().find(item => item.host === host && item.id === id);
+  const state = workspaceState(host);
+  if (!workspaceActions.has(operation) || !project ||
+      (operation !== "deleteProject" && (typeof conversation !== "string" || !uuid.test(conversation)))) {
+    throw new UserFacingError("This SSH action is no longer available.");
+  }
+  if (state.mutating) throw new UserFacingError("Another SSH operation is in progress. Try again.");
+  if (masters.get(host)?.status !== "connected" || !state.port) {
+    throw new UserFacingError("The SSH workspace is reconnecting. Try again once connected.");
+  }
+  state.mutating = true;
+  try {
+    for (let i = 0; state.pending && i < 120; i++) await pause(100);
+    if (state.pending || !state.port) throw new UserFacingError("The SSH workspace is still loading. Try again.");
+    if (operation !== "deleteProject" && !state.conversations?.[id]?.some(item => item.id === conversation)) {
+      throw new UserFacingError("This conversation is no longer in the project.");
+    }
+    try {
+      await run(python, [path.join(__dirname, "switch-project.py"), String(state.port),
+        JSON.stringify({ operation, project: id, conversation, value })], { timeout: 15000, maxBuffer: 64 * 1024 });
+    } catch {
+      throw new UserFacingError("The SSH workspace did not confirm this action. Refresh and try again.");
+    }
+    if (operation === "deleteProject") {
+      savedProjects = projects().filter(item => item !== project);
+      persist(projectFile, { projects: savedProjects });
+      if (selectedProjects.get(host) === id) selectedProjects.delete(host);
+      if (state.conversations) delete state.conversations[id];
+      if (state.destination?.project === id) state.destination = null;
+    } else if (operation !== "stopConversation") {
+      const rows = state.conversations[id];
+      if (operation === "deleteConversation") state.conversations[id] = rows.filter(item => item.id !== conversation);
+      else {
+        const row = rows.find(item => item.id === conversation);
+        const field = { rename: "title", pin: "pinned", archive: "archived", markUnread: "unread" }[operation];
+        row[field] = value;
+        rows.sort((a, b) => Number(a.archived) - Number(b.archived) || Number(b.pinned) - Number(a.pinned) || b.updated.localeCompare(a.updated));
+      }
+    }
+    return {};
+  } finally {
+    state.mutating = false;
+    state.checkedAt = 0;
+    void warmWorkspace(host);
+  }
 }
 
 async function dispatch(message) {
@@ -409,6 +486,7 @@ async function dispatch(message) {
       return {
         ...project,
         conversations: Array.isArray(conversations) ? conversations : null,
+        canManage: Boolean(connected.has(project.host) && state?.port),
         workspace: connected.has(project.host) && state?.port && Array.isArray(conversations)
           ? destinationFor(project, state.port) : null,
       };
@@ -449,6 +527,7 @@ async function dispatch(message) {
     return {};
   }
   if (action === "browse") return browse(host, directory);
+  if (action === "manage") return manageWorkspace(host, message);
   if (action === "create") {
     const name = typeof message.name === "string" ? message.name.trim() : "";
     const folders = message.folders;
@@ -459,7 +538,7 @@ async function dispatch(message) {
     const unique = [...new Set(verified)];
     const prior = projects().find(item => item.host === host && item.folders.length === 1
       && item.folders[0] === unique[0]);
-    const project = prior ?? { id: randomUUID(), host, name, folders: unique };
+    const project = prior ?? { id: randomUUID(), host, name, folders: unique, pendingRegistration: true };
     if (!prior) {
       savedProjects = [...projects(), project];
       persist(projectFile, { projects: savedProjects });
@@ -563,21 +642,92 @@ async function styleWorkspaceFrame(url, parentOrigins) {
       globalThis.__agyEmbeddedSidebarHandled = true;
       const parents = new Set(${JSON.stringify(parentOrigins)});
       const uuid = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
+      const notify = data => {
+        for (const origin of parents) window.parent.postMessage(data, origin);
+      };
+      let store, previousLayout;
+      function panes(node) {
+        if (node?.type === "pane") return [node];
+        return node?.type === "split" && Array.isArray(node.children) ? node.children.flatMap(panes) : [];
+      }
+      function currentLayout() {
+        if (!store) {
+          const root = document.querySelector('[data-testid="sidebar-split"]');
+          const key = Object.keys(root || {}).find(key => key.startsWith("__reactFiber"));
+          for (let fiber = root?.[key], depth = 0; fiber && depth < 400; fiber = fiber.return, depth++) {
+            const props = fiber.memoizedProps;
+            store = [props?.store, props?.value?.store, props?.value].find(candidate =>
+              candidate?.dispatch && candidate?.subscribe && candidate?.getState?.()?.multiConvoLayout);
+            if (store) {
+              store.subscribe(announceLayout);
+              break;
+            }
+          }
+        }
+        return store?.getState()?.multiConvoLayout;
+      }
+      function announceLayout() {
+        const root = store?.getState()?.multiConvoLayout?.rootNode;
+        if (root === previousLayout) return;
+        previousLayout = root;
+        notify({ type: "agy-ssh-panes", conversations: panes(root).map(pane => pane.cascadeId) });
+      }
+      function navigate(destination) {
+        if (destination.href === location.href) return;
+        history.pushState(history.state, "", destination.href);
+        dispatchEvent(new PopStateEvent("popstate", { state: history.state }));
+      }
       window.addEventListener("message", event => {
         if (event.source !== window.parent || !parents.has(event.origin)) return;
         const data = event.data;
         if (data?.type !== "agy-ssh-select" || !uuid.test(data.project) ||
             data.conversation && !uuid.test(data.conversation)) return;
-        const destination = new URL(data.conversation ? "/c/" + data.conversation : "/", location.origin);
-        destination.searchParams.set("project", data.project);
-        if (destination.href === location.href) return;
-        history.pushState(history.state, "", destination.href);
-        dispatchEvent(new PopStateEvent("popstate", { state: history.state }));
+        const projectPage = new URL("/", location.origin);
+        projectPage.searchParams.set("project", data.project);
+        const operation = data.operation;
+        if (["splitRight", "splitDown", "replacePane", "removePane"].includes(operation) && data.conversation) {
+          const apply = () => {
+            const layout = currentLayout();
+            if (!layout?.focusedPaneId) {
+              notify({ type: "agy-ssh-action-error", message: "The conversation layout is still loading. Try again." });
+              return;
+            }
+            const open = panes(layout.rootNode);
+            const pane = open.find(item => item.cascadeId === data.conversation);
+            if (operation === "replacePane") {
+              if (pane) store.dispatch({ type: "multiConvoLayout/resetPane", payload: { paneId: pane.id, cascadeId: "_new" } });
+            } else if (operation === "removePane") {
+              if (pane && open.length > 1) store.dispatch({ type: "multiConvoLayout/closePane", payload: pane.id });
+            } else {
+              store.dispatch({ type: "multiConvoLayout/splitPane", payload: {
+                targetPaneId: pane?.id ?? layout.focusedPaneId,
+                cascadeId: pane ? "_new" : data.conversation,
+                direction: operation === "splitRight" ? "horizontal" : "vertical",
+              } });
+            }
+            announceLayout();
+          };
+          if (new URL(location.href).searchParams.get("project") !== data.project) {
+            navigate(projectPage);
+            requestAnimationFrame(() => requestAnimationFrame(apply));
+          } else apply();
+          return;
+        }
+        if (data.conversation) projectPage.pathname = "/c/" + data.conversation;
+        if (operation === "settings") {
+          projectPage.searchParams.set("settingsOpen", "true");
+          projectPage.searchParams.set("settingsProjectId", data.project);
+        }
+        navigate(projectPage);
+        currentLayout();
+        announceLayout();
       });
       const announce = () => {
         if (!document.querySelector('[data-testid="sidebar-split"]') &&
             !(location.pathname.startsWith("/onboarding") && document.querySelector("button"))) return false;
-        for (const origin of parents) window.parent.postMessage({type:"agy-ssh-ready"}, origin);
+        notify({ type: "agy-ssh-ready" });
+        currentLayout();
+        announceLayout();
         return true;
       };
       if (!announce()) {
