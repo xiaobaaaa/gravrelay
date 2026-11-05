@@ -1,0 +1,4 @@
+#!/bin/sh
+set -eu
+package_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+exec python3 -B "$package_dir/install.py" "$@"

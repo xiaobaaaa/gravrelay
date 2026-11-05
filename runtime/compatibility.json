@@ -1,0 +1,11 @@
+{
+  "appVersion": "2.29.0",
+  "bundleId": "com.google.antigravity",
+  "teamId": "EQHXZ8M8AV",
+  "minimumNodeMajor": 22,
+  "linuxX64": {
+    "url": "https://storage.googleapis.com/antigravity-public/antigravity-hub/2.29.0-5723181030440960/unsigned/language_server-linux-x64",
+    "sha256": "cac05cef325e91df2f86215ba01ecdabd85fc6629057e0eb5eb59b0c51bf0419",
+    "tlsSpki": "JeyXQw7kf/EFhXkPlmSMOr8ABBItZp+OzlpjMuFUdas="
+  }
+}
