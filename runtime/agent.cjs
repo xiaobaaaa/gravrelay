@@ -632,14 +632,15 @@ async function styleWorkspaceFrame(url, parentOrigins) {
     await client.ready;
     const result = await client.send("Runtime.evaluate", { returnByValue: true, expression: `(() => {
       if (!document.head) return false;
-      if (globalThis.__agyEmbeddedSidebarHandled) return true;
-      const style = document.createElement("style");
+      if (globalThis.__gravRelayWorkspaceActions) return true;
+      const style = document.getElementById("agy-embedded-workspace-style") ?? document.createElement("style");
       style.id = "agy-embedded-workspace-style";
       style.textContent = '[data-testid="sidebar-split"] > :has([role="navigation"]), ' +
         '[data-testid="sidebar-split"] > :has([role="navigation"]) + :not(:last-child), ' +
         '[data-testid="sidebar-split"] ~ .absolute.left-0.top-0:has([data-testid="sidebar-toggle"]) { display:none!important }';
-      document.head.append(style);
+      if (!style.isConnected) document.head.append(style);
       globalThis.__agyEmbeddedSidebarHandled = true;
+      globalThis.__gravRelayWorkspaceActions = true;
       const parents = new Set(${JSON.stringify(parentOrigins)});
       const uuid = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
       const notify = data => {
@@ -682,6 +683,8 @@ async function styleWorkspaceFrame(url, parentOrigins) {
         const data = event.data;
         if (data?.type !== "agy-ssh-select" || !uuid.test(data.project) ||
             data.conversation && !uuid.test(data.conversation)) return;
+        // An older integration may still have a handler in this frame.
+        event.stopImmediatePropagation();
         const projectPage = new URL("/", location.origin);
         projectPage.searchParams.set("project", data.project);
         const operation = data.operation;
@@ -721,11 +724,11 @@ async function styleWorkspaceFrame(url, parentOrigins) {
         navigate(projectPage);
         currentLayout();
         announceLayout();
-      });
+      }, { capture: true });
       const announce = () => {
         if (!document.querySelector('[data-testid="sidebar-split"]') &&
             !(location.pathname.startsWith("/onboarding") && document.querySelector("button"))) return false;
-        notify({ type: "agy-ssh-ready" });
+        notify({ type: "agy-ssh-ready", actions: true });
         currentLayout();
         announceLayout();
         return true;

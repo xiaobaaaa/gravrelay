@@ -791,6 +791,7 @@
       frame.route = destination.project + ":";
       frame.ready = false;
       frame.panes = null;
+      frame.actionsReady = false;
       frame.element.src = url.href;
     }
     return frame;
@@ -842,6 +843,7 @@
     if (!frame?.ready) return;
     const route = target.project + ":" + (selection.conversation || "");
     const operation = selection.operation;
+    if (operation && !frame.actionsReady) return;
     if (force || operation || frame.route !== route) {
       frame.route = route;
       frame.element.contentWindow.postMessage({
@@ -872,6 +874,7 @@
       if (event.origin === frame.origin && event.source === frame.element.contentWindow) {
         if (event.data.type === "agy-ssh-ready") {
           frame.ready = true;
+          frame.actionsReady ||= event.data.actions === true;
           applySelection();
         } else if (event.data.type === "agy-ssh-panes" && Array.isArray(event.data.conversations)) {
           frame.panes = event.data.conversations.slice(0, 30).filter(item => item === "_new" || typeof item === "string" && uuid.test(item));
