@@ -179,6 +179,14 @@ elif syncing:
             uri = urllib.parse.urlparse(workspace_uris[0])
             if uri.scheme == 'file':
                 workspace = PurePosixPath(urllib.parse.unquote(uri.path)).name
+        status = summary.get('status')
+        has_subagents = summary.get('hasRunningSubagents') is True
+        is_idle = status in (None, 0, 1, 'CASCADE_RUN_STATUS_UNSPECIFIED', 'CASCADE_RUN_STATUS_IDLE')
+        running = not summary.get('killed') and (
+            status in ('CASCADE_RUN_STATUS_RUNNING', 'CASCADE_RUN_STATUS_BUSY', 'CASCADE_RUN_STATUS_CANCELING', 2, 3, 4)
+            or has_subagents
+        )
+        background_running = not summary.get('killed') and is_idle and not has_subagents and bool(summary.get('notFullyIdle'))
         conversations[project_id].append({
             'id': cascade_id,
             'title': title or 'Untitled conversation',
@@ -187,10 +195,8 @@ elif syncing:
             'pinned': annotations.get('pinned') is True,
             'archived': annotations.get('archived') is True,
             'unread': unread,
-            'running': not summary.get('killed') and (
-                summary.get('status') in ('CASCADE_RUN_STATUS_RUNNING', 'CASCADE_RUN_STATUS_BUSY', 'CASCADE_RUN_STATUS_CANCELING', 2, 3, 4)
-                or summary.get('hasRunningSubagents') is True
-            ),
+            'running': running,
+            'backgroundRunning': background_running,
         })
     for project_id, rows in conversations.items():
         rows.sort(key=lambda row: (not row['archived'], row['pinned'], row['updated']), reverse=True)

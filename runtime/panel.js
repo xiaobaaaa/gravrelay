@@ -99,25 +99,36 @@
     .ssh-project-header button, .ssh-conversation, .ssh-show-more { border:0;background:transparent;text-align:left; }
     .ssh-project-toggle { padding:2px 1px;color:inherit;opacity:.75; }
     .ssh-project-name { min-width:0;flex:1;padding:4px 3px;overflow:hidden;text-overflow:ellipsis; }
-    .ssh-project-name, .ssh-conversation { font-size:13px; }
+    .ssh-project-name { font-size:13px; }
     .project-folder-icon { width:17px;height:17px;display:block; }
     .host-globe { width:12px;height:12px;color:var(--host-color);flex:none; }
     .location { display:flex;align-items:center;gap:5px;flex:none;font-size:11px;opacity:.65; }
     .location .dot { width:6px;height:6px;margin:0; }
-    .ssh-conversations { padding:0 7px 2px 28px; }
-    .ssh-conversation { display:flex;align-items:center;justify-content:space-between;gap:5px;width:100%;padding:5px 4px; }
-    .ssh-conversation-title { overflow:hidden;text-overflow:ellipsis;white-space:nowrap; }
-    .ssh-conversation-wrap { display:flex;align-items:center;border-radius:7px;min-width:0; }
-    .ssh-conversation-wrap:hover, .ssh-conversation-wrap:focus-within { background:color-mix(in srgb,currentColor 7%,transparent); }
-    .ssh-conversation-wrap .ssh-conversation { min-width:0;flex:1; }
-    .ssh-conversation[aria-current="true"] { color:var(--foreground,CanvasText); }
-    .ssh-conversation[data-unread] .ssh-conversation-title { font-weight:650; }
-    .ssh-conversation[data-archived] .ssh-conversation-title { opacity:.7; }
+    .ssh-conversations { padding-bottom:2px; }
+    .ssh-conversation-wrap {
+      display:flex;align-items:center;gap:6px;min-width:0;padding:6px 8px 6px 30px;
+      border-radius:8px;color:var(--secondary-foreground,CanvasText);cursor:pointer;
+    }
+    :host-context(body[data-agy-theme][data-newux-theme]) .ssh-conversation-wrap {
+      border-top:1px solid transparent;background-clip:padding-box;padding-top:5px;
+    }
+    .ssh-conversation-wrap:is(:hover,:focus-within) { color:var(--foreground,CanvasText);background-color:var(--sidebar-muted); }
+    .ssh-conversation-wrap[data-selected="true"] { color:var(--foreground,CanvasText);background-color:var(--sidebar-secondary); }
+    button.ssh-conversation { min-width:0;flex:1;padding:0;font-size:14px;line-height:20px;
+      color:inherit;overflow:hidden;text-overflow:ellipsis;white-space:nowrap; }
+    button.ssh-conversation:is(:hover,:focus,[aria-current]) { background:transparent!important; }
+    .ssh-conversation[data-unread] { font-weight:650; }
+    .ssh-conversation[data-archived] { opacity:.7; }
+    .ssh-conversation-meta { display:flex;align-items:center;gap:6px;flex:none; }
+    .ssh-native-status { flex:none;width:16px;height:16px;opacity:.7; }
+    .ssh-native-spinner { display:grid;place-content:center;grid-template-columns:repeat(2,4px);gap:2px; }
+    .ssh-native-spinner span { width:4px;height:4px;border-radius:50%;background:currentColor; }
+    @keyframes agentStateDot { 0%,100% { opacity:.2; } 30% { opacity:1; } }
+    @keyframes agentStateCaret { 0%,50%,100% { opacity:1; } 75% { opacity:0; } }
     .ssh-inline-actions { display:none;align-items:center;gap:1px;flex:none; }
     .ssh-project-header:is(:hover,:focus-within) .ssh-inline-actions,
     .ssh-conversation-wrap:is(:hover,:focus-within) .ssh-inline-actions { display:flex; }
     .ssh-project-header:is(:hover,:focus-within) .location span:first-child { display:none; }
-    .ssh-conversation-wrap:is(:hover,:focus-within) .location span { display:none; }
     button.ssh-inline-action { border:0;display:grid;place-items:center;padding:2px;width:22px;height:22px;opacity:.8; }
     .ssh-row-menu { position:fixed;pointer-events:auto;min-width:180px;max-width:280px;max-height:calc(100vh - 10px);overflow:auto;
       padding:4px;border:1px solid color-mix(in srgb,currentColor 12%,transparent);border-radius:10px;
@@ -132,9 +143,9 @@
     .ssh-action-dialog { width:min(450px,calc(100vw - 40px)); }
     .ssh-danger { background:var(--destructive,#b8373e);color:var(--destructive-foreground,white); }
     .ssh-danger:hover:not(:disabled) { background:var(--destructive,#b8373e);filter:brightness(.91); }
-    .ssh-empty { font-size:12px;opacity:.55;padding:5px 4px; }
+    .ssh-empty { font-size:12px;opacity:.55;padding:5px 4px;margin-left:26px; }
     .ssh-show-more { display:block; }
-    button[aria-current="true"] { background:color-mix(in srgb,currentColor 10%,transparent); }
+    .ssh-project-name[aria-current="true"] { background:color-mix(in srgb,currentColor 10%,transparent); }
   `;
 
   function surface() {
@@ -327,6 +338,38 @@
 
   const plusSelector = '[data-testid="sidebar-add-project-button"]';
 
+  const localSelectionStyle = node("style", `
+    body[data-gravrelay-active-ssh] [data-testid="conversation-row-sidebar"].agy-sidebar-row[data-selected="true"] {
+      background-color:transparent!important;box-shadow:none!important;--row-bg:var(--sidebar)!important;transition:none;
+    }
+    body[data-gravrelay-active-ssh] [data-testid="conversation-row-sidebar"].agy-sidebar-row[data-selected="true"]:hover {
+      background-color:var(--sidebar-muted)!important;--row-bg:var(--sidebar-muted)!important;
+    }
+    body[data-gravrelay-active-ssh] [data-testid="conversation-row-sidebar"].agy-sidebar-row[data-selected="true"]:not(:hover) > a + div {
+      color:var(--secondary-foreground);
+    }
+  `);
+
+  function nativeConversationStyles() {
+    const rules = [];
+    function read(list) {
+      for (const rule of list) {
+        if (rule.name === "agentStateDot" || rule.name === "agentStateCaret") {
+          rules.push(rule.cssText);
+          continue;
+        }
+        const match = rule.selectorText?.match(/^(body[^ ]*) (\.agy-sidebar-row(?:\[data-selected="true"\])?)$/);
+        if (match && match[1].includes("[data-agy-theme]")) {
+          rules.push(`:host-context(${match[1]}) ${match[2]} { ${rule.style.cssText} }`);
+        } else if (rule.cssRules) read(rule.cssRules);
+      }
+    }
+    for (const sheet of document.styleSheets) {
+      try { read(sheet.cssRules); } catch {}
+    }
+    return rules.join("\n");
+  }
+
   function mountSidebar() {
     const plus = document.querySelector(plusSelector);
     const heading = plus?.closest('[data-testid="section-header"]');
@@ -341,8 +384,9 @@
 
     const { host, root } = surface();
     const rows = node("div");
-    root.append(rows);
+    root.append(node("style", nativeConversationStyles()), rows);
     host.setAttribute("data-agy-ssh-projects", "");
+    if (!localSelectionStyle.isConnected) document.head.append(localSelectionStyle);
 
     // The native virtualizer measures this row, including its SSH projects.
     heading.after(host);
@@ -660,6 +704,34 @@
     ];
   }
 
+  function nativeWorkingIndicator(conversation) {
+    if (conversation.backgroundRunning) {
+      const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      for (const [key, value] of Object.entries({
+        class: "ssh-native-status", role: "img", "aria-label": "Background task running", viewBox: "0 0 16 16",
+        fill: "none", stroke: "currentColor", "stroke-width": "1.4", "stroke-linecap": "round", "stroke-linejoin": "round",
+      })) svg.setAttribute(key, value);
+      for (const pathData of ["M3.7 5.2L6.7 8L3.7 10.8", "M8.3 10.8H12.3"]) {
+        const path = document.createElementNS(svg.namespaceURI, "path");
+        path.setAttribute("d", pathData);
+        if (svg.childElementCount) path.style.animation = "agentStateCaret 2.8s ease-in-out infinite";
+        svg.append(path);
+      }
+      return svg;
+    }
+    if (!conversation.running) return null;
+    const spinner = node("span", "", "ssh-native-status ssh-native-spinner");
+    spinner.setAttribute("role", "img");
+    spinner.setAttribute("aria-label", "Working");
+    spinner.title = "Working";
+    for (const delay of ["0s", "-1.05s", "-0.35s", "-0.7s"]) {
+      const dot = node("span");
+      dot.style.animation = `agentStateDot 1.4s ease-in-out ${delay} infinite`;
+      spinner.append(dot);
+    }
+    return spinner;
+  }
+
   function drawSidebar() {
     if (!sidebar) return;
     sidebar.updateVisibility();
@@ -710,18 +782,23 @@
         } else {
           const shown = expandedConversationLists.has(project.id) ? conversations : conversations.slice(0, 5);
           for (const conversation of shown) {
-            const wrap = node("div", "", "ssh-conversation-wrap");
-            const entry = button("", () => selectSaved(project, conversation.id), "ssh-conversation");
+            const wrap = node("div", "", "ssh-conversation-wrap agy-sidebar-row");
+            wrap.dataset.project = project.id;
+            wrap.dataset.conversation = conversation.id;
+            const open = () => selectSaved(project, conversation.id);
+            const entry = button(conversation.title, open, "ssh-conversation");
             if (conversation.unread) entry.setAttribute("data-unread", "");
             if (conversation.archived) entry.setAttribute("data-archived", "");
-            const source = node("span", "", "location");
-            source.title = project.host;
-            source.append(sourceIcon(project.host), node("span", formatActivity(conversation.updated)));
-            entry.append(node("span", conversation.title, "ssh-conversation-title"), source);
-            entry.title = conversation.title + " · " + project.host;
-            if (selection?.project === project.id && selection.conversation === conversation.id) {
-              entry.setAttribute("aria-current", "true");
-            }
+            const source = node("span", "", "ssh-conversation-meta");
+            const activity = formatActivity(conversation.updated);
+            source.title = activity ? project.host + " · " + activity : project.host;
+            source.append(sourceIcon(project.host));
+            const indicator = nativeWorkingIndicator(conversation);
+            if (indicator) source.append(indicator);
+            entry.title = conversation.title + " · " + source.title;
+            wrap.addEventListener("click", event => {
+              if (event.isTrusted && (event.target === wrap || source.contains(event.target))) open();
+            });
             const controls = node("div", "", "ssh-inline-actions");
             const options = iconButton("More options", "more", anchor => showRowMenu(anchor, conversationActions(project, conversation)), true);
             const archive = iconButton(conversation.running ? "Stop Conversation" : conversation.archived ? "Restore Conversation" : "Archive Conversation",
@@ -740,7 +817,7 @@
               event.preventDefault();
               showRowMenu(options, conversationActions(project, conversation), { x: event.clientX, y: event.clientY });
             });
-            wrap.append(entry, controls);
+            wrap.append(entry, controls, source);
             list.append(wrap);
           }
           if (shown.length < conversations.length) {
@@ -755,12 +832,26 @@
       rows.append(group);
     }
     sidebar.rows.replaceChildren(rows);
+    syncConversationHighlight();
   }
 
   const workspaceFrames = new Map();
   const positionedPanes = new Map();
   let displayedWorkspace = null;
+  let displayedSelection = null;
   let selection = null;
+
+  function syncConversationHighlight() {
+    if (!sidebar) return;
+    for (const row of sidebar.rows.querySelectorAll(".ssh-conversation-wrap")) {
+      const selected = displayedSelection?.project === row.dataset.project &&
+        displayedSelection?.conversation === row.dataset.conversation;
+      row.dataset.selected = String(selected);
+      const entry = row.querySelector(".ssh-conversation");
+      if (selected) entry.setAttribute("aria-current", "true");
+      else entry.removeAttribute("aria-current");
+    }
+  }
 
   function workspaceFrame(destination) {
     const url = new URL(destination.address);
@@ -806,10 +897,17 @@
     for (const [element, inert] of frame.inert ?? []) element.inert = inert;
     frame.inert = null;
     displayedWorkspace = null;
+    displayedSelection = null;
+    document.body.removeAttribute("data-gravrelay-active-ssh");
+    syncConversationHighlight();
   }
 
   function revealWorkspace(frame) {
-    if (displayedWorkspace === frame) return;
+    if (displayedWorkspace === frame) {
+      displayedSelection = selection;
+      syncConversationHighlight();
+      return;
+    }
     hideWorkspace();
     frame.element.style.visibility = "visible";
     frame.element.style.pointerEvents = "auto";
@@ -821,6 +919,9 @@
       child.inert = true;
     }
     displayedWorkspace = frame;
+    displayedSelection = selection;
+    document.body.setAttribute("data-gravrelay-active-ssh", "");
+    syncConversationHighlight();
   }
 
   function applySelection(destination, force = false) {
@@ -1132,6 +1233,7 @@
     observer.disconnect();
     settings?.remove();
     sidebar?.remove();
+    localSelectionStyle.remove();
     projectMenu?.extension.remove();
     folderPicker?.dialog.close();
     hideWorkspace();
