@@ -96,6 +96,7 @@
     .ssh-host-form .row { grid-column:1/-1; }
     .ssh-project { margin: 2px 0; }
     .ssh-project-header { display:flex;align-items:center;gap:4px;min-height:30px;padding:0 7px; }
+    .ssh-project-header, .ssh-conversation-wrap { position:relative;--ssh-actions-bg:var(--sidebar,Canvas); }
     .ssh-project-header button, .ssh-conversation, .ssh-show-more { border:0;background:transparent;text-align:left; }
     .ssh-project-toggle { padding:2px 1px;color:inherit;opacity:.75; }
     .ssh-project-name { min-width:0;flex:1;padding:4px 3px;overflow:hidden;text-overflow:ellipsis; }
@@ -112,8 +113,14 @@
     :host-context(body[data-agy-theme][data-newux-theme]) .ssh-conversation-wrap {
       border-top:1px solid transparent;background-clip:padding-box;padding-top:5px;
     }
-    .ssh-conversation-wrap:is(:hover,:focus-within) { color:var(--foreground,CanvasText);background-color:var(--sidebar-muted); }
-    .ssh-conversation-wrap[data-selected="true"] { color:var(--foreground,CanvasText);background-color:var(--sidebar-secondary); }
+    .ssh-conversation-wrap:is(:hover,:focus-within) {
+      --ssh-actions-bg:var(--sidebar-muted,Canvas);
+      color:var(--foreground,CanvasText);background-color:var(--sidebar-muted);
+    }
+    .ssh-conversation-wrap[data-selected="true"] {
+      --ssh-actions-bg:var(--row-bg,var(--sidebar-secondary,Canvas));
+      color:var(--foreground,CanvasText);background-color:var(--sidebar-secondary);
+    }
     button.ssh-conversation { min-width:0;flex:1;padding:0;font-size:14px;line-height:20px;
       color:inherit;overflow:hidden;text-overflow:ellipsis;white-space:nowrap; }
     button.ssh-conversation:is(:hover,:focus,[aria-current]) { background:transparent!important; }
@@ -125,10 +132,19 @@
     .ssh-native-spinner span { width:4px;height:4px;border-radius:50%;background:currentColor; }
     @keyframes agentStateDot { 0%,100% { opacity:.2; } 30% { opacity:1; } }
     @keyframes agentStateCaret { 0%,50%,100% { opacity:1; } 75% { opacity:0; } }
-    .ssh-inline-actions { display:none;align-items:center;gap:1px;flex:none; }
-    .ssh-project-header:is(:hover,:focus-within) .ssh-inline-actions,
-    .ssh-conversation-wrap:is(:hover,:focus-within) .ssh-inline-actions { display:flex; }
-    .ssh-project-header:is(:hover,:focus-within) .location span:first-child { display:none; }
+    .ssh-inline-actions {
+      display:none;position:absolute;inset-block:0;inset-inline-end:8px;z-index:1;
+      align-items:center;gap:1px;background:var(--ssh-actions-bg);
+    }
+    .ssh-project-header > .ssh-inline-actions { inset-inline-end:7px; }
+    .ssh-inline-actions::before {
+      content:"";position:absolute;inset-block:0;inset-inline-end:100%;width:18px;pointer-events:none;
+      background:linear-gradient(to right,transparent,var(--ssh-actions-bg));
+    }
+    :is(.ssh-project-header,.ssh-conversation-wrap):is(:hover,:has(:focus-visible,.ssh-inline-action[aria-expanded="true"])) {
+      > .ssh-inline-actions { display:flex; }
+      > :is(.location,.ssh-conversation-meta) { visibility:hidden; }
+    }
     button.ssh-inline-action { border:0;display:grid;place-items:center;padding:2px;width:22px;height:22px;opacity:.8; }
     .ssh-row-menu { position:fixed;pointer-events:auto;min-width:180px;max-width:280px;max-height:calc(100vh - 10px);overflow:auto;
       padding:4px;border:1px solid color-mix(in srgb,currentColor 12%,transparent);border-radius:10px;

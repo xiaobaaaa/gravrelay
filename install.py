@@ -17,7 +17,7 @@ import time
 ROOT = Path(__file__).resolve().parent
 SOURCE = ROOT / 'runtime'
 COMPATIBILITY = json.loads((SOURCE / 'compatibility.json').read_text())
-RELEASE = '0.1.4'
+RELEASE = '0.1.5'
 LABEL = 'local.antigravity.ssh-settings'
 RUNTIME = ('agent.cjs', 'panel.js', 'connect.py', 'switch-project.py', 'compatibility.json')
 
