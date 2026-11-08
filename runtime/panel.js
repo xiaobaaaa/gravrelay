@@ -869,6 +869,46 @@
     }
   }
 
+  const themeClasses = ["theme-standalone", "dark", "dark-theme", "theme-dark", "theme-light"];
+  const themeAttributes = ["data-agy-theme", "data-agy-home-glow", "data-newux-theme", "data-ag-theme-seeded"];
+  let themeAnimationFrame = null;
+
+  function themePart(element) {
+    const properties = Object.fromEntries([...element.style].filter(name => name.startsWith("--"))
+      .map(name => [name, element.style.getPropertyValue(name)]));
+    for (const name of ["color-scheme", "color", "background-color", "font-family"]) {
+      properties[name] = element.style.getPropertyValue(name);
+    }
+    return {
+      classes: themeClasses.filter(name => element.classList.contains(name)),
+      attributes: Object.fromEntries(themeAttributes.map(name => [name, element.getAttribute(name)])),
+      properties,
+    };
+  }
+
+  function syncWorkspaceThemes() {
+    themeAnimationFrame = null;
+    if (disposed || !document.body || !workspaceFrames.size) return;
+    const theme = { root: themePart(document.documentElement), body: themePart(document.body) };
+    const signature = JSON.stringify(theme);
+    for (const frame of workspaceFrames.values()) {
+      if (!frame.origin || frame.themeSignature === signature) continue;
+      frame.element.contentWindow.postMessage({ type: "agy-ssh-theme", theme }, frame.origin);
+      frame.themeSignature = signature;
+    }
+  }
+
+  function scheduleWorkspaceTheme() {
+    if (themeAnimationFrame === null && !disposed) {
+      themeAnimationFrame = requestAnimationFrame(syncWorkspaceThemes);
+    }
+  }
+
+  const themeObserver = new MutationObserver(scheduleWorkspaceTheme);
+  const themeObservation = { attributes: true, attributeFilter: ["class", "style", ...themeAttributes] };
+  themeObserver.observe(document.documentElement, themeObservation);
+  themeObserver.observe(document.body, themeObservation);
+
   function workspaceFrame(destination) {
     const url = new URL(destination.address);
     if (url.protocol !== "https:" || url.hostname !== "localhost" ||
@@ -891,6 +931,10 @@
       }
       content.append(element);
       frame = { element, content, origin: "", route: "", ready: false };
+      element.addEventListener("load", () => {
+        frame.themeSignature = null;
+        scheduleWorkspaceTheme();
+      });
       workspaceFrames.set(destination.host, frame);
     }
     if (frame.origin !== url.origin) {
@@ -899,8 +943,10 @@
       frame.ready = false;
       frame.panes = null;
       frame.actionsReady = false;
+      frame.themeSignature = null;
       frame.element.src = url.href;
     }
+    scheduleWorkspaceTheme();
     return frame;
   }
 
@@ -986,10 +1032,15 @@
   }
 
   function receiveWorkspaceReady(event) {
-    if (!["agy-ssh-ready", "agy-ssh-panes", "agy-ssh-action-error"].includes(event.data?.type)) return;
+    if (!["agy-ssh-ready", "agy-ssh-theme-ready", "agy-ssh-panes", "agy-ssh-action-error"].includes(event.data?.type)) return;
     for (const frame of workspaceFrames.values()) {
       if (event.origin === frame.origin && event.source === frame.element.contentWindow) {
-        if (event.data.type === "agy-ssh-ready") {
+        if (event.data.type === "agy-ssh-theme-ready") {
+          frame.themeSignature = null;
+          scheduleWorkspaceTheme();
+        } else if (event.data.type === "agy-ssh-ready") {
+          frame.themeSignature = null;
+          scheduleWorkspaceTheme();
           frame.ready = true;
           frame.actionsReady ||= event.data.actions === true;
           applySelection();
@@ -1247,6 +1298,8 @@
     disposed = true;
     clearInterval(tick);
     observer.disconnect();
+    themeObserver.disconnect();
+    if (themeAnimationFrame !== null) cancelAnimationFrame(themeAnimationFrame);
     settings?.remove();
     sidebar?.remove();
     localSelectionStyle.remove();

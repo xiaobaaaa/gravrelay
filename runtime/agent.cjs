@@ -626,12 +626,74 @@ async function workspaceHost(url) {
   return hosts[ports.indexOf(Number(candidate.port))] || "";
 }
 
+function followWorkspaceTheme(parentOrigins) {
+  if (window === window.top || globalThis.__gravRelayThemeInstalled) return;
+  globalThis.__gravRelayThemeInstalled = true;
+  const parents = new Set(parentOrigins);
+  const themeClasses = ["theme-standalone", "dark", "dark-theme", "theme-dark", "theme-light"];
+  const themeAttributes = ["data-agy-theme", "data-agy-home-glow", "data-newux-theme", "data-ag-theme-seeded"];
+  const propertyName = /^--[a-zA-Z][a-zA-Z0-9-]*$/;
+  const styleNames = ["color-scheme", "color", "background-color", "font-family"];
+  let theme;
+
+  function validPart(part) {
+    return part && Array.isArray(part.classes) && part.classes.every(name => themeClasses.includes(name)) &&
+      part.attributes && typeof part.attributes === "object" &&
+      Object.entries(part.attributes).every(([name, value]) =>
+        themeAttributes.includes(name) && (value === null || typeof value === "string" && value.length < 80)) &&
+      part.properties && typeof part.properties === "object" &&
+      Object.keys(part.properties).length <= 256 &&
+      Object.entries(part.properties).every(([name, value]) =>
+        (propertyName.test(name) || styleNames.includes(name)) && typeof value === "string" && value.length <= 2000);
+  }
+
+  function applyPart(element, part) {
+    for (const name of themeClasses) {
+      const enabled = part.classes.includes(name);
+      if (element.classList.contains(name) !== enabled) element.classList.toggle(name, enabled);
+    }
+    for (const name of themeAttributes) {
+      const value = part.attributes[name] ?? null;
+      if (element.getAttribute(name) === value) continue;
+      if (value === null) element.removeAttribute(name);
+      else element.setAttribute(name, value);
+    }
+    for (const name of [...element.style]) {
+      if (propertyName.test(name) && !Object.hasOwn(part.properties, name)) element.style.removeProperty(name);
+    }
+    for (const [name, value] of Object.entries(part.properties)) {
+      if (element.style.getPropertyValue(name) !== value) element.style.setProperty(name, value);
+    }
+  }
+
+  function apply() {
+    if (!theme || !document.body) return;
+    applyPart(document.documentElement, theme.root);
+    applyPart(document.body, theme.body);
+  }
+
+  window.addEventListener("message", event => {
+    if (event.source !== window.parent || !parents.has(event.origin) ||
+        event.data?.type !== "agy-ssh-theme") return;
+    const candidate = event.data.theme;
+    if (!candidate || !validPart(candidate.root) || !validPart(candidate.body)) return;
+    theme = candidate;
+    apply();
+  });
+  const observer = new MutationObserver(apply);
+  const options = { attributes: true, attributeFilter: ["class", "style", ...themeAttributes] };
+  observer.observe(document.documentElement, options);
+  if (document.body) observer.observe(document.body, options);
+  for (const origin of parents) window.parent.postMessage({ type: "agy-ssh-theme-ready" }, origin);
+}
+
 async function styleWorkspaceFrame(url, parentOrigins) {
   const client = new CDP(url);
   try {
     await client.ready;
     const result = await client.send("Runtime.evaluate", { returnByValue: true, expression: `(() => {
       if (!document.head) return false;
+      (${followWorkspaceTheme.toString()})(${JSON.stringify(parentOrigins)});
       if (globalThis.__gravRelayWorkspaceActions) return true;
       const style = document.getElementById("agy-embedded-workspace-style") ?? document.createElement("style");
       style.id = "agy-embedded-workspace-style";
