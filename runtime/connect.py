@@ -154,7 +154,7 @@ def forward(host, local_port, remote_port):
     proc = subprocess.Popen([*SSH, *managed_ssh_config(host), '-N', '-o', 'ExitOnForwardFailure=yes',
                              '-L', f'127.0.0.1:{local_port}:127.0.0.1:{remote_port}',
                              host], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    deadline = time.monotonic() + 8
+    deadline = time.monotonic() + 40
     while time.monotonic() < deadline and proc.poll() is None:
         owner = subprocess.run(
             ['/usr/sbin/lsof', '-nP', '-a', '-p', str(proc.pid),
@@ -166,6 +166,32 @@ def forward(host, local_port, remote_port):
         time.sleep(0.1)
     terminate(proc)
     raise RuntimeError('Could not create the local SSH tunnel. The port may be in use.')
+
+
+def tunnel_ready(port, context):
+    try:
+        with socket.create_connection(('127.0.0.1', port), timeout=8) as stream:
+            with context.wrap_socket(stream, server_hostname='localhost'):
+                return True
+    except OSError:
+        return False
+
+
+def refresh_forward(host, port, remote_port, tunnel, context):
+    if tunnel.poll() is None and tunnel_ready(port, context):
+        return port, tunnel
+    replacement = None
+    try:
+        with socket.socket() as reservation:
+            reservation.bind(('127.0.0.1', 0))
+            replacement_port = reservation.getsockname()[1]
+        replacement = forward(host, replacement_port, remote_port)
+        if tunnel_ready(replacement_port, context):
+            return replacement_port, replacement
+    except (OSError, RuntimeError, subprocess.SubprocessError):
+        pass
+    terminate(replacement)
+    return port, tunnel
 
 
 def listeners(host, port):
@@ -296,6 +322,7 @@ def run_backend(host, directory, server, proxy_url, probe, project_spec=None, st
                                text=True, errors='replace')
     events = Queue()
     tunnel = callback = None
+    retired_tunnels = []
 
     def parse():
         for line in backend.stdout:
@@ -359,18 +386,31 @@ def run_backend(host, directory, server, proxy_url, probe, project_spec=None, st
             return
         session_status(host, directory, 'Connected', port)
         print('READY', flush=True)
+        next_probe = time.monotonic() + 10
         while True:
-            if tunnel.poll() is not None or backend.poll() is not None:
+            if backend.poll() is not None:
                 raise RuntimeError(f'The SSH session to {host} disconnected.')
+            if time.monotonic() >= next_probe:
+                new_port, replacement = refresh_forward(host, port, remote_port, tunnel, context)
+                if replacement is not tunnel:
+                    retired_tunnels.append(tunnel)
+                    tunnel, port = replacement, new_port
+                    session_status(host, directory, 'Connected', port)
+                next_probe = time.monotonic() + 10
             try:
                 event, value = events.get(timeout=0.4)
             except Empty:
                 continue
             if event == 'oauth':
-                terminate(callback)
-                callback = oauth_callback(host, value)
+                try:
+                    replacement_callback = oauth_callback(host, value)
+                except (OSError, RuntimeError, subprocess.SubprocessError):
+                    print('The sign-in callback could not be forwarded. Retry sign-in.', file=sys.stderr, flush=True)
+                else:
+                    terminate(callback)
+                    callback = replacement_callback
     finally:
-        for proc in (callback, tunnel, backend):
+        for proc in (callback, tunnel, backend, *retired_tunnels):
             terminate(proc)
 
 

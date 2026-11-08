@@ -29,7 +29,7 @@
       const timer = setTimeout(() => {
         pending.delete(id);
         reject(new Error("The SSH request timed out."));
-      }, action === "open" || action === "create" ? 90000 : 45000);
+      }, action === "open" || action === "create" ? 90000 : action === "manage" ? 60000 : 45000);
       pending.set(id, { resolve, reject, timer });
       globalThis.__agyConnectionsBridge(JSON.stringify({ id, action, ...args }));
     });
@@ -756,7 +756,8 @@
     const rows = document.createDocumentFragment();
     for (const project of snapshot?.projects || []) {
       if (project.host === remoteHost || archived && !project.conversations?.some(row => row.archived)) continue;
-      const state = snapshot.hosts.find(item => item.host === project.host)?.status;
+      const connection = snapshot.hosts.find(item => item.host === project.host)?.status;
+      const state = connection === "connected" && !project.workspace ? "connecting" : connection;
       const collapsed = collapsedProjects.has(project.id);
       const group = node("div", "", "ssh-project");
       const header = node("div", "", "ssh-project-header");
@@ -771,7 +772,10 @@
       const select = button(project.name, () => selectSaved(project), "ssh-project-name");
       select.title = project.folders.join("\n");
       select.setAttribute("aria-label", "Open SSH project " + project.name + " · " + project.host);
-      if (selection?.project === project.id && !selection.conversation) select.setAttribute("aria-current", "true");
+      if (selection?.project === project.id && !selection.conversation) {
+        select.setAttribute("aria-current", "true");
+        if (displayedSelection?.project !== project.id) select.setAttribute("aria-busy", "true");
+      }
 
       const location = node("span", "", "location");
       location.title = project.host + " · " + (stateLabel[state] || "Disconnected");
@@ -809,8 +813,6 @@
             const activity = formatActivity(conversation.updated);
             source.title = activity ? project.host + " · " + activity : project.host;
             source.append(sourceIcon(project.host));
-            const indicator = nativeWorkingIndicator(conversation);
-            if (indicator) source.append(indicator);
             entry.title = conversation.title + " · " + source.title;
             wrap.addEventListener("click", event => {
               if (event.isTrusted && (event.target === wrap || source.contains(event.target))) open();
@@ -866,6 +868,23 @@
       const entry = row.querySelector(".ssh-conversation");
       if (selected) entry.setAttribute("aria-current", "true");
       else entry.removeAttribute("aria-current");
+      const waiting = !selected && selection?.project === row.dataset.project &&
+        selection?.conversation === row.dataset.conversation;
+      row.toggleAttribute("aria-busy", waiting);
+      const project = snapshot?.projects.find(item => item.id === row.dataset.project);
+      const conversation = project?.conversations?.find(item => item.id === row.dataset.conversation);
+      const activity = waiting ? "connecting" : conversation?.backgroundRunning ? "background"
+        : conversation?.running ? "working" : "idle";
+      if (row.dataset.activity === activity) continue;
+      row.dataset.activity = activity;
+      const meta = row.querySelector(".ssh-conversation-meta");
+      meta.querySelector(".ssh-native-status")?.remove();
+      const indicator = nativeWorkingIndicator(waiting ? { running: true } : conversation ?? {});
+      if (waiting) {
+        indicator.setAttribute("aria-label", "Reconnecting");
+        indicator.title = "Reconnecting to " + project.host;
+      }
+      if (indicator) meta.append(indicator);
     }
   }
 
@@ -932,8 +951,13 @@
       content.append(element);
       frame = { element, content, origin: "", route: "", ready: false };
       element.addEventListener("load", () => {
+        frame.ready = false;
+        frame.workspaceReady = undefined;
+        frame.actionsReady = false;
         frame.themeSignature = null;
+        frame.lastProbe = 0;
         scheduleWorkspaceTheme();
+        probeWorkspace(frame);
       });
       workspaceFrames.set(destination.host, frame);
     }
@@ -941,13 +965,21 @@
       frame.origin = url.origin;
       frame.route = destination.project + ":";
       frame.ready = false;
+      frame.workspaceReady = undefined;
       frame.panes = null;
       frame.actionsReady = false;
       frame.themeSignature = null;
       frame.element.src = url.href;
     }
     scheduleWorkspaceTheme();
+    probeWorkspace(frame);
     return frame;
+  }
+
+  function probeWorkspace(frame) {
+    if (frame.ready || !frame.origin || Date.now() - (frame.lastProbe ?? 0) < 1000) return;
+    frame.lastProbe = Date.now();
+    frame.element.contentWindow.postMessage({ type: "agy-ssh-probe" }, frame.origin);
   }
 
   function hideWorkspace() {
@@ -966,7 +998,7 @@
 
   function revealWorkspace(frame) {
     if (displayedWorkspace === frame) {
-      displayedSelection = selection;
+      displayedSelection = frame.workspaceReady === false ? null : selection;
       syncConversationHighlight();
       return;
     }
@@ -981,7 +1013,7 @@
       child.inert = true;
     }
     displayedWorkspace = frame;
-    displayedSelection = selection;
+    displayedSelection = frame.workspaceReady === false ? null : selection;
     document.body.setAttribute("data-gravrelay-active-ssh", "");
     syncConversationHighlight();
   }
@@ -1004,6 +1036,10 @@
     }
     const frame = workspaceFrame(target);
     if (!frame?.ready) return;
+    if (frame.workspaceReady === false) {
+      revealWorkspace(frame);
+      return;
+    }
     const route = target.project + ":" + (selection.conversation || "");
     const operation = selection.operation;
     if (operation && !frame.actionsReady) return;
@@ -1042,6 +1078,10 @@
           frame.themeSignature = null;
           scheduleWorkspaceTheme();
           frame.ready = true;
+          if (typeof event.data.workspace === "boolean") {
+            if (frame.workspaceReady === false && event.data.workspace) frame.route = null;
+            frame.workspaceReady = event.data.workspace;
+          }
           frame.actionsReady ||= event.data.actions === true;
           applySelection();
         } else if (event.data.type === "agy-ssh-panes" && Array.isArray(event.data.conversations)) {

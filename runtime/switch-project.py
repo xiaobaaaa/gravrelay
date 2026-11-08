@@ -27,7 +27,7 @@ UUID = re.compile(r'[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}')
 probe = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
 probe.check_hostname = False
 probe.verify_mode = ssl.CERT_NONE
-with socket.create_connection(('127.0.0.1', port), timeout=4) as tcp:
+with socket.create_connection(('127.0.0.1', port), timeout=8) as tcp:
     with probe.wrap_socket(tcp, server_hostname='localhost') as secured:
         pem = ssl.DER_cert_to_PEM_cert(secured.getpeercert(binary_form=True))
 public = subprocess.check_output(['/usr/bin/openssl', 'x509', '-pubkey', '-noout'], input=pem.encode())
@@ -37,7 +37,7 @@ if base64.b64encode(hashlib.sha256(spki).digest()).decode() != PIN:
 context = ssl.create_default_context(cadata=pem)
 browser = urllib.request.build_opener(urllib.request.ProxyHandler({}), urllib.request.HTTPSHandler(context=context))
 base = f'https://localhost:{port}'
-with browser.open(base + '/', timeout=4) as response:
+with browser.open(base + '/', timeout=8) as response:
     html = response.read(100000).decode()
 csrf = re.search(r'"?csrfToken"?\s*:\s*"([^"]+)"', html)[1]
 
@@ -48,7 +48,7 @@ def rpc(name, payload):
         'Connect-Protocol-Version': '1',
         'X-Codeium-Csrf-Token': csrf,
     })
-    with browser.open(request, timeout=6) as response:
+    with browser.open(request, timeout=10) as response:
         data = response.read(8 * 1024 * 1024 + 1)
         if len(data) > 8 * 1024 * 1024:
             raise RuntimeError('Unexpectedly large workspace response.')
@@ -66,7 +66,7 @@ def initial_summaries():
             'X-Codeium-Csrf-Token': csrf,
         },
     )
-    with browser.open(request, timeout=6) as response:
+    with browser.open(request, timeout=10) as response:
         header = response.read(5)
         if len(header) != 5:
             raise RuntimeError('The conversation stream ended before its initial state.')

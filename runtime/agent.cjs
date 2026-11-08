@@ -3,7 +3,8 @@
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { createHash, randomUUID } = require("node:crypto");
+const { createHash, randomUUID, X509Certificate } = require("node:crypto");
+const tls = require("node:tls");
 const { execFile, spawn } = require("node:child_process");
 const { promisify } = require("node:util");
 const { isIP } = require("node:net");
@@ -342,10 +343,26 @@ function destinationFor(project, port) {
 function workspaceState(host) {
   let state = workspaces.get(host);
   if (!state) {
-    state = { pending: false, retryAt: 0, checkedAt: 0, namesAt: 0, port: null, conversations: null, destination: null };
+    state = { pending: false, retryAt: 0, checkedAt: 0, namesAt: 0, unavailable: false, port: null, conversations: null, destination: null };
     workspaces.set(host, state);
   }
   return state;
+}
+
+async function workspaceResponds(port) {
+  return new Promise(resolve => {
+    const socket = tls.connect({ host: "127.0.0.1", port, servername: "localhost", rejectUnauthorized: false });
+    const finish = ready => { socket.destroy(); resolve(ready); };
+    socket.setTimeout(8000, () => finish(false));
+    socket.once("error", () => finish(false));
+    socket.once("secureConnect", () => {
+      try {
+        const certificate = new X509Certificate(socket.getPeerCertificate().raw);
+        const key = certificate.publicKey.export({ type: "spki", format: "der" });
+        finish(createHash("sha256").update(key).digest("base64") === compatibility.linuxX64.tlsSpki);
+      } catch { finish(false); }
+    });
+  });
 }
 
 async function warmWorkspace(host) {
@@ -354,13 +371,22 @@ async function warmWorkspace(host) {
   const state = workspaceState(host);
   if (state.pending || state.mutating || state.retryAt > Date.now() || Date.now() - state.checkedAt < 6000) return;
   state.pending = true;
+  const project = saved.find(item => item.id === selectedProjects.get(host)) ?? saved[0];
+  let port, transportReady;
   try {
-    const project = saved.find(item => item.id === selectedProjects.get(host)) ?? saved[0];
-    const port = await workspacePort(project);
-    const includeNames = state.port !== port || Date.now() - state.namesAt >= 30000;
+    port = await workspacePort(project);
+    const samePort = state.port === port;
+    if (!samePort) {
+      transportReady = await workspaceResponds(port);
+      if (!transportReady) throw new Error("Workspace transport is unavailable.");
+    }
+    const includeNames = !samePort || Date.now() - state.namesAt >= 30000;
+    const previous = samePort ? state.conversations : null;
+    state.port = port;
+    state.destination = destinationFor(project, port);
+    state.unavailable = false;
     const result = await run(python, [path.join(__dirname, "switch-project.py"),
-      String(port), JSON.stringify({ projects: saved, catalog: true, includeNames })], { timeout: 18000, maxBuffer: 2 * 1024 * 1024 });
-    const previous = state.port === port ? state.conversations : null;
+      String(port), JSON.stringify({ projects: saved, catalog: true, includeNames })], { timeout: 45000, maxBuffer: 2 * 1024 * 1024 });
     const catalog = JSON.parse(result.stdout);
     if (includeNames) state.namesAt = Date.now();
     state.conversations = catalog.conversations;
@@ -386,9 +412,13 @@ async function warmWorkspace(host) {
     const active = available.find(item => item.id === project.id) ?? available[0];
     state.destination = active ? destinationFor(active, port) : null;
     state.checkedAt = Date.now();
+    state.unavailable = false;
   } catch {
-    state.port = null;
-    state.destination = null;
+    // A failed history refresh must not disable an otherwise healthy workspace.
+    const reachable = Boolean(port && transportReady !== false && await workspaceResponds(port));
+    state.port = reachable ? port : null;
+    state.destination = reachable ? destinationFor(project, port) : null;
+    state.unavailable = !reachable;
     state.retryAt = Date.now() + 10000;
   } finally {
     state.pending = false;
@@ -403,7 +433,7 @@ async function openCreatedProject(project) {
   const port = await workspacePort(project);
   try {
     await run(python, [path.join(__dirname, "switch-project.py"),
-      String(port), JSON.stringify(project)], { timeout: 15000, maxBuffer: 64 * 1024 });
+      String(port), JSON.stringify(project)], { timeout: 45000, maxBuffer: 64 * 1024 });
   } catch {
     throw new UserFacingError("The SSH workspace could not open this project. Check the connection and folder.");
   }
@@ -443,7 +473,7 @@ async function manageWorkspace(host, message) {
     }
     try {
       await run(python, [path.join(__dirname, "switch-project.py"), String(state.port),
-        JSON.stringify({ operation, project: id, conversation, value })], { timeout: 15000, maxBuffer: 64 * 1024 });
+        JSON.stringify({ operation, project: id, conversation, value })], { timeout: 45000, maxBuffer: 64 * 1024 });
     } catch {
       throw new UserFacingError("The SSH workspace did not confirm this action. Refresh and try again.");
     }
@@ -477,7 +507,9 @@ async function dispatch(message) {
   if (action === "snapshot") {
     const list = records.map(item => ({
       host: item.host, enabled: item.enabled,
-      status: item.enabled ? masters.get(item.host)?.status ?? "connecting" : "disconnected",
+      status: !item.enabled ? "disconnected"
+        : masters.get(item.host)?.status === "connected" && workspaces.get(item.host)?.unavailable ? "failed"
+        : masters.get(item.host)?.status ?? "connecting",
     }));
     const connected = new Set(list.filter(item => item.status === "connected").map(item => item.host));
     const saved = projects().map(project => {
@@ -487,7 +519,7 @@ async function dispatch(message) {
         ...project,
         conversations: Array.isArray(conversations) ? conversations : null,
         canManage: Boolean(connected.has(project.host) && state?.port),
-        workspace: connected.has(project.host) && state?.port && Array.isArray(conversations)
+        workspace: connected.has(project.host) && state?.port
           ? destinationFor(project, state.port) : null,
       };
     });
@@ -687,6 +719,28 @@ function followWorkspaceTheme(parentOrigins) {
   for (const origin of parents) window.parent.postMessage({ type: "agy-ssh-theme-ready" }, origin);
 }
 
+function installWorkspaceReadiness(parentOrigins) {
+  if (window === window.top || globalThis.__gravRelayReadinessInstalled === 2) return;
+  globalThis.__gravRelayReadinessInstalled = 2;
+  const parents = new Set(parentOrigins);
+  let previous;
+  function announce(force = false) {
+    const workspace = Boolean(document.querySelector('[data-testid="sidebar-split"]'));
+    if (!workspace && !(location.pathname.startsWith("/onboarding") && document.querySelector("button"))) return;
+    if (!force && previous === workspace) return;
+    previous = workspace;
+    for (const origin of parents) window.parent.postMessage({
+      type: "agy-ssh-ready", actions: globalThis.__gravRelayWorkspaceActions === true, workspace,
+    }, origin);
+  }
+  window.addEventListener("message", event => {
+    if (event.source === window.parent && parents.has(event.origin) && event.data?.type === "agy-ssh-probe") announce(true);
+  });
+  const observer = new MutationObserver(() => announce());
+  observer.observe(document.documentElement, { childList: true, subtree: true });
+  announce();
+}
+
 async function styleWorkspaceFrame(url, parentOrigins) {
   const client = new CDP(url);
   try {
@@ -694,6 +748,7 @@ async function styleWorkspaceFrame(url, parentOrigins) {
     const result = await client.send("Runtime.evaluate", { returnByValue: true, expression: `(() => {
       if (!document.head) return false;
       (${followWorkspaceTheme.toString()})(${JSON.stringify(parentOrigins)});
+      (${installWorkspaceReadiness.toString()})(${JSON.stringify(parentOrigins)});
       if (globalThis.__gravRelayWorkspaceActions) return true;
       const style = document.getElementById("agy-embedded-workspace-style") ?? document.createElement("style");
       style.id = "agy-embedded-workspace-style";
