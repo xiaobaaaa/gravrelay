@@ -19,7 +19,7 @@ sh install.sh
 You can also install directly from the release tag.
 
 ```sh
-git clone --branch v0.2.1 --depth 1 https://github.com/xiaobaaaa/gravrelay.git
+git clone --branch v0.2.2 --depth 1 https://github.com/xiaobaaaa/gravrelay.git
 cd gravrelay
 sh install.sh
 ```
@@ -39,6 +39,8 @@ Once the host is connected, choose **Projects → New SSH Project**. Select the 
 The message box uses Antigravity's native permissions picker. It changes the SSH host's default preset, or the project's preset when that project has an override. Available options follow the remote host's sandbox support. GravRelay does not change the selected preset during installation, and does not enable experimental conversation-scoped overrides that the CLI backend rejects.
 
 Hover over a project or conversation for its shortcuts and options. SSH projects support copying the project name, opening Project Settings, starting a conversation, and deleting the project. SSH conversations support renaming, pinning, marking read or unread, copying details, splitting, archiving, and deleting. Use the sidebar's **Display Options → Archived Only** to restore or permanently delete an archived conversation. Deleting a project removes its conversations on the SSH host and keeps the source folder.
+
+SSH file panes show their source host and a Download action. Text, Markdown, code, images and other formats supported by Antigravity keep their native viewers. PDF files use the app's bundled PDF.js renderer, with one page rendered at a time, page navigation and zoom. Inline PDF preview rejects files over 48 MiB after reading; downloads remain available through the native file service. Formats without a viewer keep a download action. Downloads save a copy on the Mac; the remote source is unchanged.
 
 The remote coding agent runs inside the official Antigravity CLI service. SSH carries authenticated RPC traffic to its loopback listener; the bridge verifies the service process, TLS key, and connection token. The Mac loads the original app's UI assets locally.
 
