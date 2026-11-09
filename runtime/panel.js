@@ -1,10 +1,20 @@
-(() => {
+(function installConnectionsPanel() {
   if (globalThis.__agyConnectionsInstalled || window !== window.top) return;
+  if (!document.head || !document.body) {
+    if (!globalThis.__agyConnectionsWaiting) {
+      globalThis.__agyConnectionsWaiting = true;
+      document.addEventListener("DOMContentLoaded", () => {
+        globalThis.__agyConnectionsWaiting = false;
+        installConnectionsPanel();
+      }, { once: true });
+    }
+    return;
+  }
   globalThis.__agyConnectionsInstalled = true;
 
   const pending = new Map();
   const remoteHost = globalThis.__agyConnectionsRemoteHost || "";
-  let sequence = 0, snapshot, disposed = false, refreshPending = false;
+  let sequence = Date.now(), snapshot, disposed = false, refreshPending = false;
   let settings, sidebar;
   let scheduled = false;
 
@@ -285,6 +295,7 @@
           const state = node("div", "", "muted");
           state.append(node("span", "", "dot " + record.status), document.createTextNode(stateLabel[record.status]));
           detail.append(node("span", record.host, "host-name"), state);
+          if (record.enabled && record.error) detail.append(node("div", record.error, "muted"));
           row.append(toggle, detail);
           if (record.status === "failed") {
             row.append(button("Retry", control => act(status, async () => {
@@ -930,8 +941,10 @@
 
   function workspaceFrame(destination) {
     const url = new URL(destination.address);
-    if (url.protocol !== "https:" || url.hostname !== "localhost" ||
-        url.origin === location.origin || url.username || url.password || url.pathname !== "/") return null;
+    const cli = destination.backend === "cli";
+    if (url.protocol !== "https:" || url.username || url.password || url.pathname !== "/" ||
+        (cli ? url.origin !== location.origin || url.searchParams.get("__gravrelay_ssh") !== destination.host :
+          url.hostname !== "localhost" || url.origin === location.origin)) return null;
     const split = document.querySelector('[data-testid="sidebar-split"]');
     const content = split?.lastElementChild;
     if (!content || content.contains(document.querySelector('[data-testid="conversation-list-sidebar"]'))) return null;
@@ -943,7 +956,8 @@
       element.setAttribute("sandbox", "allow-scripts allow-same-origin allow-forms allow-downloads");
       element.setAttribute("data-agy-workspace-frame", destination.host);
       element.setAttribute("aria-hidden", "true");
-      element.style.cssText = "position:absolute;inset:0;width:100%;height:100%;border:0;visibility:hidden;pointer-events:none;z-index:2;background:var(--background)";
+      element.inert = true;
+      element.style.cssText = "position:absolute;inset:0;width:100%;height:100%;border:0;opacity:0;pointer-events:none;z-index:2;background:var(--background)";
       if (getComputedStyle(content).position === "static") {
         positionedPanes.set(content, content.style.position);
         content.style.position = "relative";
@@ -971,6 +985,7 @@
       frame.themeSignature = null;
       frame.element.src = url.href;
     }
+    frame.bootstrap = destination.backend === "cli" ? destination : null;
     scheduleWorkspaceTheme();
     probeWorkspace(frame);
     return frame;
@@ -985,7 +1000,8 @@
   function hideWorkspace() {
     if (!displayedWorkspace) return;
     const frame = displayedWorkspace;
-    frame.element.style.visibility = "hidden";
+    frame.element.style.opacity = "0";
+    frame.element.inert = true;
     frame.element.style.pointerEvents = "none";
     frame.element.setAttribute("aria-hidden", "true");
     for (const [element, inert] of frame.inert ?? []) element.inert = inert;
@@ -1003,7 +1019,8 @@
       return;
     }
     hideWorkspace();
-    frame.element.style.visibility = "visible";
+    frame.element.style.opacity = "1";
+    frame.element.inert = false;
     frame.element.style.pointerEvents = "auto";
     frame.element.removeAttribute("aria-hidden");
     frame.inert = new Map();
@@ -1023,9 +1040,13 @@
     const project = snapshot?.projects.find(item => item.id === selection.project);
     if (snapshot && !project && !destination) { selection = null; hideWorkspace(); return; }
     const target = destination ?? project?.workspace;
-    if (!target || !uuid.test(target.project) || selection.conversation && !uuid.test(selection.conversation)) return;
+    if (!target) {
+      if (project && snapshot?.hosts?.some(host => host.host === project.host && !host.enabled)) hideWorkspace();
+      return;
+    }
+    if (!uuid.test(target.project) || selection.conversation && !uuid.test(selection.conversation)) return;
     const url = new URL(target.address);
-    if (url.origin === location.origin) {
+    if (url.origin === location.origin && target.backend !== "cli") {
       hideWorkspace();
       if (selection.conversation) url.pathname = "/c/" + selection.conversation;
       if (location.href !== url.href) {
@@ -1068,16 +1089,26 @@
   }
 
   function receiveWorkspaceReady(event) {
-    if (!["agy-ssh-ready", "agy-ssh-theme-ready", "agy-ssh-panes", "agy-ssh-action-error"].includes(event.data?.type)) return;
-    for (const frame of workspaceFrames.values()) {
+    if (!["agy-ssh-ready", "agy-ssh-theme-ready", "agy-ssh-panes", "agy-ssh-action-error", "agy-ssh-catalog", "agy-ssh-cli-bootstrap-request"].includes(event.data?.type)) return;
+    for (const [host, frame] of workspaceFrames) {
       if (event.origin === frame.origin && event.source === frame.element.contentWindow) {
-        if (event.data.type === "agy-ssh-theme-ready") {
+        if (event.data.type === "agy-ssh-cli-bootstrap-request") {
+          const value = frame.bootstrap;
+          if (value && value.host === host && event.data.host === host) {
+            frame.element.contentWindow.postMessage({ type: "agy-ssh-cli-bootstrap", host,
+              rpcOrigin: value.rpcOrigin, csrf: value.csrf }, frame.origin);
+          }
+        } else if (event.data.type === "agy-ssh-catalog") {
+          request("catalog", { host, conversations: event.data.conversations,
+            names: event.data.names, projectIds: event.data.projectIds, initial: event.data.initial === true }).then(refresh).catch(() => {});
+        } else if (event.data.type === "agy-ssh-theme-ready") {
           frame.themeSignature = null;
           scheduleWorkspaceTheme();
         } else if (event.data.type === "agy-ssh-ready") {
           frame.themeSignature = null;
           scheduleWorkspaceTheme();
           frame.ready = true;
+          frame.element.contentWindow.postMessage({ type: "agy-ssh-catalog-probe" }, frame.origin);
           if (typeof event.data.workspace === "boolean") {
             if (frame.workspaceReady === false && event.data.workspace) frame.route = null;
             frame.workspaceReady = event.data.workspace;

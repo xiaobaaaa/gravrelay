@@ -300,11 +300,13 @@ def connect(host, directory, probe, project_spec=None, start_only=False):
         terminate(proxy)
 
 
-def existing_workspace_port(host, server):
+def existing_workspace_port(host, server, preferred_port=None):
     code = r'''
 import base64, hashlib, json, os, re, socket, ssl, subprocess, sys
 from pathlib import Path
-server, profile, digest, fingerprint = sys.argv[1:]
+server, profile, digest, fingerprint, preferred = sys.argv[1:]
+server = os.path.expanduser(server)
+fallback = None
 for process in Path('/proc').iterdir():
     if not process.name.isdecimal():
         continue
@@ -357,16 +359,19 @@ for process in Path('/proc').iterdir():
                                 break
                             received += part
                             if b'csrfToken' in received:
+                                if preferred != '0' and port != int(preferred):
+                                    fallback = port
+                                    break
                                 print(json.dumps({'port': port}))
                                 raise SystemExit(0)
             except (OSError, subprocess.SubprocessError):
                 continue
     except (OSError, IndexError, UnicodeError):
         continue
-print('null')
+print(json.dumps({'port': fallback}) if fallback else 'null')
 '''
     result = json.loads(remote(host, shlex.join([
-        'python3', '-c', code, server, APP_DATA, SHA256, BACKEND_CERT_SPKI,
+        'python3', '-c', code, server, APP_DATA, SHA256, BACKEND_CERT_SPKI, str(preferred_port or 0),
     ]), timeout=60))
     return result['port'] if result else None
 
@@ -465,7 +470,7 @@ def run_backend(host, directory, server, proxy_url, probe, project_spec=None, st
         while True:
             if backend is not None and backend.poll() is not None:
                 raise RuntimeError(f'The SSH session to {host} disconnected.')
-            if time.monotonic() >= next_probe:
+            if time.monotonic() >= next_probe and tunnel.poll() is not None:
                 new_port, replacement = refresh_forward(host, port, remote_port, tunnel, context)
                 if replacement is not tunnel:
                     retired_tunnels.append(tunnel)
@@ -501,6 +506,7 @@ def main():
     parser.add_argument('--browse', action='store_true')
     parser.add_argument('--probe', action='store_true')
     parser.add_argument('--headless', action='store_true', help=argparse.SUPPRESS)
+    parser.add_argument('--legacy-owned', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--project-spec')
     parser.add_argument('--start-only', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args()
@@ -511,6 +517,10 @@ def main():
         parser.error('Invalid SSH host alias.')
     if not args.directory or not args.directory.startswith(('~', '/')):
         parser.error('Enter an absolute remote path.')
+    if args.headless and not args.probe and not args.legacy_owned:
+        from transport import main as stable_transport
+        stable_transport(args.host)
+        return
     try:
         directory, children = directory_info(args.host, args.directory)
         if args.browse:

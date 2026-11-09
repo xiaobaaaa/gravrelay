@@ -5,6 +5,8 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
+import stat
 from pathlib import Path, PurePosixPath
 import re
 import socket
@@ -37,9 +39,23 @@ if base64.b64encode(hashlib.sha256(spki).digest()).decode() != PIN:
 context = ssl.create_default_context(cadata=pem)
 browser = urllib.request.build_opener(urllib.request.ProxyHandler({}), urllib.request.HTTPSHandler(context=context))
 base = f'https://localhost:{port}'
-with browser.open(base + '/', timeout=8) as response:
-    html = response.read(100000).decode()
-csrf = re.search(r'"?csrfToken"?\s*:\s*"([^"]+)"', html)[1]
+session_file = os.environ.get('GRAVRELAY_BACKEND_SESSION')
+session = None
+if session_file:
+    record = Path(session_file)
+    info = record.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+        raise RuntimeError('The backend session must be a private file.')
+    session = json.loads(record.read_text())
+    if session.get('schema') != 3 or session.get('backend') != 'cli' or session.get('port') != port:
+        raise RuntimeError('The CLI session does not match this tunnel.')
+    csrf = session.get('csrf')
+    if not isinstance(csrf, str) or not re.fullmatch(r'[A-Za-z0-9_-]{32,128}', csrf):
+        raise RuntimeError('Invalid CLI connection token.')
+else:
+    with browser.open(base + '/', timeout=8) as response:
+        html = response.read(100000).decode()
+    csrf = re.search(r'"?csrfToken"?\\s*:\\s*"([^"]+)"', html)[1]
 
 
 def rpc(name, payload):

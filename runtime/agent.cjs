@@ -3,14 +3,14 @@
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { createHash, randomUUID, X509Certificate } = require("node:crypto");
-const tls = require("node:tls");
+const { createHash, randomUUID } = require("node:crypto");
 const { execFile, spawn } = require("node:child_process");
 const { promisify } = require("node:util");
 const { isIP } = require("node:net");
 
 const run = promisify(execFile);
 const compatibility = require("./compatibility.json");
+const installCLIFrontend = require("./cli-frontend.cjs");
 const original = process.env.AGY_SSH_APP || "/Applications/Antigravity.app";
 const python = process.env.AGY_SSH_PYTHON || "/usr/bin/python3";
 const binary = original + "/Contents/MacOS/Antigravity";
@@ -25,6 +25,7 @@ const socketDirectory = path.join(os.homedir(), ".ssh/agy-settings");
 const connector = path.join(__dirname, "connect.py");
 const devtoolsFile = path.join(library, "Antigravity/DevToolsActivePort");
 const panelPath = path.join(__dirname, "panel.js");
+const catalogFile = path.join(moduleData, "catalog-cache.json");
 const world = "AntigravitySSHSettings-" + randomUUID();
 const alias = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 const uuid = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/;
@@ -36,6 +37,17 @@ const selectedProjects = new Map();
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 class UserFacingError extends Error {}
 let hostsCache, savedProjects, savedHosts, stop = false;
+let frontendOrigin = "", appPID = null, catalogTimer;
+function cacheCatalog() {
+  if (catalogTimer) return;
+  catalogTimer = setTimeout(() => {
+    catalogTimer = null;
+    const hosts = Object.fromEntries([...workspaces].filter(([, state]) => state.conversations).map(([host, state]) => [host, { conversations: state.conversations }]));
+    try { persist(catalogFile, { schema: 1, hosts }); }
+    catch { console.error("Could not save the SSH conversation cache."); }
+  }, 2000);
+  catalogTimer.unref();
+}
 
 function jsonFile(file) {
   try { return JSON.parse(fs.readFileSync(file, "utf8")); }
@@ -214,6 +226,26 @@ async function connectHost(host) {
   }
 }
 
+function ownsTransportProcess(host, session, output) {
+  const match = output.trim().match(/^(\d+)\s+([\s\S]+)$/);
+  if (!match || Number(match[1]) !== session.supervisorPID || session.host !== host) return false;
+  const command = match[2];
+  const script = "/transport.py --host " + host;
+  return command.includes(path.join(moduleData, "releases") + path.sep) &&
+    (command.endsWith(script) || command.includes(script + " "));
+}
+
+async function stopLocalTransport(host) {
+  const session = transportState(host);
+  if (!session) return;
+  const { stdout } = await run("/bin/ps", ["-p", String(session.supervisorPID), "-o", "pgid=,command="],
+    { timeout: 2500, maxBuffer: 64 * 1024 }).catch(() => ({ stdout: "" }));
+  if (!ownsTransportProcess(host, session, stdout)) return;
+  try { process.kill(-session.supervisorPID, "SIGTERM"); }
+  catch (error) { if (error.code !== "ESRCH") throw error; }
+  for (let count = 0; count < 20 && running(session.supervisorPID); count++) await pause(100);
+}
+
 async function disconnectHost(host) {
   const state = masters.get(host);
   masters.delete(host);
@@ -229,12 +261,15 @@ async function maintainConnections() {
   checkingConnections = true;
   try {
     await Promise.all(configuredHosts().filter(record => record.enabled).map(async ({ host }) => {
+      if (projects().some(project => project.host === host)) {
+        void warmWorkspace(host);
+        return;
+      }
       const state = masters.get(host);
       if (state?.status === "connected" && !(await checkMaster(host)) && masters.get(host) === state) {
         markDisconnected(state);
       }
       void connectHost(host);
-      if (masters.get(host)?.status === "connected") void warmWorkspace(host);
     }));
   } finally {
     checkingConnections = false;
@@ -243,7 +278,7 @@ async function maintainConnections() {
 
 async function browse(host, directory) {
   if (!validPath(directory) && directory !== "~") throw new UserFacingError("Enter an absolute remote folder path.");
-  if (masters.get(host)?.status !== "connected" || !(await checkMaster(host))) {
+  if (!configuredHosts().some(record => record.host === host && record.enabled)) {
     throw new UserFacingError("Connect to this host in Settings → Connections first.");
   }
   const script = "import json,os,sys;p=os.path.realpath(os.path.expanduser(sys.argv[1]));" +
@@ -251,9 +286,11 @@ async function browse(host, directory) {
     "print(json.dumps({'path':p,'children':children[:400]}))";
   const quote = value => "'" + value.replace(/'/g, "'\\''") + "'";
   try {
-    const { stdout } = await run(ssh, [...sshConfigFor(host), ...sshOptions, "-T", "-S", socketFor(host),
-      "-o", "ControlMaster=no", "-o", "ProxyCommand=/usr/bin/false", host,
-      "python3 -c " + quote(script) + " " + quote(directory)], { timeout: 12000, maxBuffer: 512 * 1024 });
+    const multiplex = masters.get(host)?.status === "connected" && await checkMaster(host)
+      ? ["-S", socketFor(host), "-o", "ControlMaster=no", "-o", "ProxyCommand=/usr/bin/false"]
+      : ["-S", "none", "-o", "ControlMaster=no"];
+    const { stdout } = await run(ssh, [...sshConfigFor(host), ...sshOptions, "-T", ...multiplex, host,
+      "python3 -c " + quote(script) + " " + quote(directory)], { timeout: 30000, maxBuffer: 512 * 1024 });
     const result = JSON.parse(stdout);
     if (!validPath(result.path) || !Array.isArray(result.children)) throw new Error("bad directory");
     return result;
@@ -283,6 +320,8 @@ async function previewWindow(host) {
 }
 
 async function verifiedWorkspacePort(host) {
+  const stable = await stableWorkspacePort(host);
+  if (stable) return stable;
   const folder = path.join(legacy, host);
   const session = jsonFile(path.join(folder, "session.json"));
   const processes = await processRows();
@@ -311,25 +350,42 @@ async function verifiedWorkspacePort(host) {
   return null;
 }
 
+function transportState(host) {
+  const session = jsonFile(path.join(legacy, host, "transport.json"));
+  if (session?.schema !== 3 || session.backend !== "cli" || !Number.isInteger(session.port) || !running(session.supervisorPID)) return null;
+  return session;
+}
+
+async function stableWorkspacePort(host) {
+  const session = transportState(host);
+  if (!session || session.state !== "connected" || typeof session.csrf !== "string" ||
+      !/^[A-Za-z0-9_-]{32,128}$/.test(session.csrf)) return null;
+  return (await loopbackPorts([session.supervisorPID])).includes(session.port) ? session.port : null;
+}
+
 async function workspacePort(project) {
   const host = project.host;
-  let port = await verifiedWorkspacePort(host);
-  if (port) return port;
+  const existing = await stableWorkspacePort(host);
+  if (existing) return existing;
   let startup = opening.get(host);
   if (!startup) {
     startup = (async () => {
-      const child = spawn(python, [connector, "--headless", "--start-only", "--host", host, "--directory", "~"], { detached: true, stdio: "ignore" });
       let exited = false;
-      child.once("error", () => { exited = true; });
-      child.once("exit", () => { exited = true; });
-      child.unref();
-      const deadline = Date.now() + 180000;
-      while (Date.now() < deadline && !exited) {
-        await pause(600);
-        const port = await verifiedWorkspacePort(host);
-        if (port) return port;
+      if (!transportState(host)) {
+        const child = spawn(python, [path.join(__dirname, "transport.py"), "--host", host, ...(appPID ? ["--app-pid", String(appPID)] : [])],
+          { detached: true, stdio: "ignore" });
+        child.once("error", () => { exited = true; });
+        child.once("exit", () => { exited = true; });
+        child.unref();
       }
-      throw new UserFacingError("The SSH workspace could not start. Check the connection and try again.");
+      const deadline = Date.now() + 90000;
+      while (Date.now() < deadline) {
+        const port = await stableWorkspacePort(host);
+        if (port) return port;
+        if (exited) break;
+        await pause(300);
+      }
+      throw new UserFacingError("The SSH transport could not start. It will retry automatically.");
     })().finally(() => opening.delete(host));
     opening.set(host, startup);
   }
@@ -337,90 +393,46 @@ async function workspacePort(project) {
 }
 
 function destinationFor(project, port) {
-  const address = new URL("https://localhost:" + port + "/");
+  const session = transportState(project.host);
+  if (!frontendOrigin || !session?.csrf) return null;
+  const address = new URL("/", frontendOrigin);
   address.searchParams.set("project", project.id);
-  return { address: address.href, host: project.host, project: project.id };
+  address.searchParams.set("__gravrelay_ssh", project.host);
+  return { address: address.href, host: project.host, project: project.id,
+    backend: "cli", rpcOrigin: "https://localhost:" + port, csrf: session.csrf };
 }
 
 function workspaceState(host) {
   let state = workspaces.get(host);
   if (!state) {
-    state = { pending: false, retryAt: 0, checkedAt: 0, namesAt: 0, unavailable: false, port: null, conversations: null, destination: null };
+    let cached = jsonFile(catalogFile)?.hosts?.[host]?.conversations;
+    if (!cached) {
+      const previous = jsonFile(path.join(moduleData, "connection-cache.json"))?.projects;
+      if (Array.isArray(previous)) cached = Object.fromEntries(previous.filter(item => item.host === host && Array.isArray(item.conversations)).map(item => [item.id, item.conversations]));
+    }
+    state = { pending: false, retryAt: 0, checkedAt: 0, port: null, conversations: cached ?? null, destination: null };
     workspaces.set(host, state);
   }
   return state;
 }
 
-async function workspaceResponds(port) {
-  return new Promise(resolve => {
-    const socket = tls.connect({ host: "127.0.0.1", port, servername: "localhost", rejectUnauthorized: false });
-    const finish = ready => { socket.destroy(); resolve(ready); };
-    socket.setTimeout(8000, () => finish(false));
-    socket.once("error", () => finish(false));
-    socket.once("secureConnect", () => {
-      try {
-        const certificate = new X509Certificate(socket.getPeerCertificate().raw);
-        const key = certificate.publicKey.export({ type: "spki", format: "der" });
-        finish(createHash("sha256").update(key).digest("base64") === compatibility.linuxX64.tlsSpki);
-      } catch { finish(false); }
-    });
-  });
-}
-
 async function warmWorkspace(host) {
+  if (!configuredHosts().some(record => record.host === host && record.enabled)) return;
   const saved = projects().filter(project => project.host === host);
   if (!saved.length) return;
   const state = workspaceState(host);
   if (state.pending || state.mutating || state.retryAt > Date.now() || Date.now() - state.checkedAt < 6000) return;
   state.pending = true;
   const project = saved.find(item => item.id === selectedProjects.get(host)) ?? saved[0];
-  let port, transportReady;
   try {
-    port = await workspacePort(project);
-    const samePort = state.port === port;
-    if (!samePort) {
-      transportReady = await workspaceResponds(port);
-      if (!transportReady) throw new Error("Workspace transport is unavailable.");
-    }
-    const includeNames = !samePort || Date.now() - state.namesAt >= 30000;
-    const previous = samePort ? state.conversations : null;
+    const port = await workspacePort(project);
     state.port = port;
     state.destination = destinationFor(project, port);
-    state.unavailable = false;
-    const result = await run(python, [path.join(__dirname, "switch-project.py"),
-      String(port), JSON.stringify({ projects: saved, catalog: true, includeNames })], { timeout: 45000, maxBuffer: 2 * 1024 * 1024 });
-    const catalog = JSON.parse(result.stdout);
-    if (includeNames) state.namesAt = Date.now();
-    state.conversations = catalog.conversations;
-    let changed = false;
-    savedProjects = projects().filter(item => {
-      if (item.host !== host || !saved.includes(item)) return true;
-      if (Array.isArray(state.conversations[item.id])) {
-        const name = catalog.names[item.id];
-        if (name && name !== item.name) { item.name = name; changed = true; }
-        if (!item.registered || item.pendingRegistration) {
-          item.registered = true;
-          item.pendingRegistration = false;
-          changed = true;
-        }
-        return true;
-      }
-      if (item.registered && Array.isArray(previous?.[item.id])) { changed = true; return false; }
-      return true;
-    });
-    if (changed) persist(projectFile, { projects: savedProjects });
-    state.port = port;
-    const available = projects().filter(item => item.host === host && Array.isArray(state.conversations[item.id]));
-    const active = available.find(item => item.id === project.id) ?? available[0];
-    state.destination = active ? destinationFor(active, port) : null;
     state.checkedAt = Date.now();
-    state.unavailable = false;
   } catch {
-    // A failed history refresh must not disable an otherwise healthy workspace.
-    const reachable = Boolean(port && transportReady !== false && await workspaceResponds(port));
-    state.port = reachable ? port : null;
-    state.destination = reachable ? destinationFor(project, port) : null;
-    state.unavailable = !reachable;
+    const transport = transportState(host);
+    state.port = transport?.port ?? null;
+    state.destination = transport ? destinationFor(project, transport.port) : null;
     state.retryAt = Date.now() + 10000;
   } finally {
     state.pending = false;
@@ -429,13 +441,13 @@ async function warmWorkspace(host) {
 
 async function openCreatedProject(project) {
   const host = project.host;
-  if (masters.get(host)?.status !== "connected" || !(await checkMaster(host))) {
+  if (!configuredHosts().some(record => record.host === host && record.enabled)) {
     throw new UserFacingError("SSH is reconnecting. The project will load automatically.");
   }
   const port = await workspacePort(project);
   try {
     await run(python, [path.join(__dirname, "switch-project.py"),
-      String(port), JSON.stringify(project)], { timeout: 45000, maxBuffer: 64 * 1024 });
+      String(port), JSON.stringify(project)], { timeout: 45000, maxBuffer: 64 * 1024, env: { ...process.env, GRAVRELAY_BACKEND_SESSION: path.join(legacy, host, "transport.json") } });
   } catch {
     throw new UserFacingError("The SSH workspace could not open this project. Check the connection and folder.");
   }
@@ -475,7 +487,7 @@ async function manageWorkspace(host, message) {
     }
     try {
       await run(python, [path.join(__dirname, "switch-project.py"), String(state.port),
-        JSON.stringify({ operation, project: id, conversation, value })], { timeout: 45000, maxBuffer: 64 * 1024 });
+        JSON.stringify({ operation, project: id, conversation, value })], { timeout: 45000, maxBuffer: 64 * 1024, env: { ...process.env, GRAVRELAY_BACKEND_SESSION: path.join(legacy, host, "transport.json") } });
     } catch {
       throw new UserFacingError("The SSH workspace did not confirm this action. Refresh and try again.");
     }
@@ -507,18 +519,21 @@ async function dispatch(message) {
   const { action, host, path: directory } = message;
   const records = configuredHosts();
   if (action === "snapshot") {
-    const list = records.map(item => ({
-      host: item.host, enabled: item.enabled,
-      status: !item.enabled ? "disconnected"
-        : masters.get(item.host)?.status === "connected" && workspaces.get(item.host)?.unavailable ? "failed"
-        : masters.get(item.host)?.status ?? "connecting",
-    }));
+    const list = records.map(item => {
+      const transport = transportState(item.host);
+      const hasProjects = projects().some(project => project.host === item.host);
+      const status = hasProjects
+        ? transport?.state === "connected" ? "connected" : ["connecting", "prepared"].includes(transport?.state) ? "connecting" : "failed"
+        : masters.get(item.host)?.status ?? "connecting";
+      return { host: item.host, enabled: item.enabled, status: item.enabled ? status : "disconnected", error: transport?.error ?? null };
+    });
     const connected = new Set(list.filter(item => item.status === "connected").map(item => item.host));
     const saved = projects().map(project => {
       const state = workspaces.get(project.host);
       const conversations = state?.conversations?.[project.id];
       return {
         ...project,
+        loading: !Object.hasOwn(state?.conversations ?? {}, project.id),
         conversations: Array.isArray(conversations) ? conversations : null,
         canManage: Boolean(connected.has(project.host) && state?.port),
         workspace: connected.has(project.host) && state?.port
@@ -529,6 +544,49 @@ async function dispatch(message) {
       const state = workspaces.get(host);
       return connected.has(host) && state?.destination ? [state.destination] : [];
     }) };
+  }
+  if (action === "catalog") {
+    if (typeof host !== "string" || !records.some(item => item.host === host && item.enabled)) return {};
+    const saved = projects().filter(project => project.host === host);
+    const known = new Set(saved.map(project => project.id));
+    const incoming = message.conversations;
+    if (!incoming || typeof incoming !== "object" || Array.isArray(incoming)) return {};
+    const conversations = {};
+    for (const project of saved) {
+      const rows = Array.isArray(incoming[project.id]) ? incoming[project.id] : [];
+      conversations[project.id] = rows.slice(0, 200).filter(row =>
+        typeof row?.id === "string" && uuid.test(row.id) && typeof row.title === "string"
+      ).map(row => ({
+        id: row.id, title: row.title.slice(0, 180),
+        updated: typeof row.updated === "string" ? row.updated : "",
+        workspace: typeof row.workspace === "string" ? row.workspace.slice(0, 180) : "",
+        pinned: row.pinned === true, archived: row.archived === true, unread: row.unread === true,
+        running: row.running === true, backgroundRunning: row.backgroundRunning === true,
+      }));
+    }
+    workspaceState(host).conversations = conversations;
+    cacheCatalog();
+    let changed = false;
+    for (const project of saved) {
+      const name = message.names?.[project.id];
+      if (typeof name === "string" && name.length && name.length <= 120 && name !== project.name) {
+        project.name = name;
+        changed = true;
+      }
+    }
+    if (Array.isArray(message.projectIds) && message.projectIds.every(id => typeof id === "string" && uuid.test(id))) {
+      const existing = new Set(message.projectIds);
+      const previous = message.initial ? null : workspaceState(host).catalogProjectIds;
+      workspaceState(host).catalogProjectIds = existing;
+      savedProjects = projects().filter(project => {
+        if (project.host !== host || !known.has(project.id) || existing.has(project.id) ||
+            !previous?.has(project.id) || project.pendingRegistration) return true;
+        changed = true;
+        return false;
+      });
+    }
+    if (changed) persist(projectFile, { projects: projects() });
+    return {};
   }
   if (action === "aliases") {
     return (await availableAliases()).filter(name => !records.some(item => item.host === name));
@@ -553,8 +611,12 @@ async function dispatch(message) {
     if (record.enabled) {
       const state = masters.get(host);
       if (state?.status === "failed") state.retryAt = 0;
-      void connectHost(host);
+      const workspace = workspaces.get(host);
+      if (workspace) { workspace.retryAt = 0; workspace.checkedAt = 0; }
+      if (projects().some(project => project.host === host)) void warmWorkspace(host);
+      else void connectHost(host);
     } else {
+      await stopLocalTransport(host);
       workspaces.delete(host);
       await disconnectHost(host);
     }
@@ -651,13 +713,9 @@ function localPage(url, allowed) {
 async function workspaceHost(url) {
   let candidate;
   try { candidate = new URL(url); } catch { return ""; }
-  if (candidate.protocol !== "https:" || candidate.hostname !== "localhost" || candidate.username || candidate.password) return "";
-  for (const [host, state] of workspaces) {
-    if (state.destination && new URL(state.destination.address).origin === candidate.origin) return host;
-  }
-  const hosts = [...new Set(projects().map(project => project.host))];
-  const ports = await Promise.all(hosts.map(host => verifiedWorkspacePort(host).catch(() => null)));
-  return hosts[ports.indexOf(Number(candidate.port))] || "";
+  const host = candidate.searchParams.get("__gravrelay_ssh");
+  if (!host || !alias.test(host) || candidate.origin !== frontendOrigin || candidate.username || candidate.password) return "";
+  return configuredHosts().some(item => item.host === host && item.enabled) ? host : "";
 }
 
 function followWorkspaceTheme(parentOrigins) {
@@ -743,14 +801,108 @@ function installWorkspaceReadiness(parentOrigins) {
   announce();
 }
 
-async function styleWorkspaceFrame(url, parentOrigins) {
+function followWorkspaceCatalog(parentOrigins) {
+  if (window === window.top || globalThis.__gravRelayCatalogInstalled) return;
+  globalThis.__gravRelayCatalogInstalled = true;
+  const parents = new Set(parentOrigins);
+  const uuid = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
+  let store, registry, scheduled = false, catalogSignature = "";
+
+  function publish(force = false) {
+    if (!store) return;
+          const summaries = store.getState()?.trajectorySummaries?.summaries;
+          if (!summaries) return;
+          const conversations = {}, names = {};
+          const projects = registry?.projectsStateProvider?.getState();
+          const ids = Array.isArray(projects) ? projects.map(item => item.project?.id).filter(id => uuid.test(id)) : undefined;
+          for (const [id, summary] of Object.entries(summaries)) {
+            if (!summary) continue;
+            const metadata = summary.trajectoryMetadata, annotations = summary.annotations ?? {};
+            const project = metadata?.projectId;
+            if (!uuid.test(id) || !uuid.test(project) || metadata.parentConversationId) continue;
+            const rows = conversations[project] ??= [];
+            if (rows.length >= 200) continue;
+            const seconds = Number(summary.lastModifiedTime?.seconds ?? 0);
+            const viewed = Number(annotations.lastUserViewTime?.seconds ?? 0);
+            rows.push({
+              id, title: String(annotations.title || summary.summary || "Untitled conversation").slice(0, 180),
+              updated: seconds ? new Date(seconds * 1000).toISOString() : "",
+              workspace: (() => {
+                try {
+                  const value = metadata.workspaceUris?.[0];
+                  return typeof value === "string" ? decodeURIComponent(new URL(value).pathname).split("/").filter(Boolean).at(-1) ?? "" : "";
+                } catch { return ""; }
+              })(), pinned: annotations.pinned === true, archived: annotations.archived === true,
+              unread: annotations.markedAsUnread === true || !summary.notFullyIdle && seconds > viewed,
+              running: !summary.killed && ([2, 3, 4].includes(summary.status) || summary.hasRunningSubagents === true),
+              backgroundRunning: !summary.killed && !summary.hasRunningSubagents &&
+                ![2, 3, 4].includes(summary.status) && summary.notFullyIdle === true,
+            });
+          }
+          for (const [id, rows] of Object.entries(conversations)) {
+            rows.sort((a, b) => Number(a.archived) - Number(b.archived) ||
+              Number(b.pinned) - Number(a.pinned) || b.updated.localeCompare(a.updated));
+            const project = registry?.getProjectStateProvider(id)?.getState()?.project;
+            if (project?.name) names[id] = project.name;
+          }
+          const data = { type: "agy-ssh-catalog", conversations, names, projectIds: ids, initial: !catalogSignature };
+          const signature = JSON.stringify(data);
+          if (force || signature !== catalogSignature) {
+            catalogSignature = signature;
+            for (const origin of parents) window.parent.postMessage(data, origin);
+          }
+
+  }
+
+  function schedule() {
+    if (scheduled) return;
+    scheduled = true;
+    queueMicrotask(() => { scheduled = false; publish(); });
+  }
+
+  function findStore() {
+    const root = document.querySelector('[data-testid="sidebar-split"]');
+    const key = Object.keys(root || {}).find(name => name.startsWith("__reactFiber"));
+    for (let fiber = root?.[key], depth = 0; fiber && depth < 400; fiber = fiber.return, depth++) {
+      const props = fiber.memoizedProps;
+      const core = props?.value?.core;
+      if (core && !registry) registry = Object.values(core).find(service =>
+        service && typeof service.getProjectStateProvider === "function" && service.projectsStateProvider);
+      if (!store) {
+        const candidate = [props?.store, props?.value?.store, props?.value].find(value =>
+          value?.subscribe && value?.getState?.()?.trajectorySummaries);
+        if (candidate) {
+          store = candidate;
+          store.subscribe(schedule);
+        }
+      }
+    }
+    if (!store) return false;
+    publish(true);
+    return true;
+  }
+
+  window.addEventListener("message", event => {
+    if (event.source === window.parent && parents.has(event.origin) && event.data?.type === "agy-ssh-catalog-probe") {
+      if (!store) findStore();
+      else publish(true);
+    }
+  });
+  if (!findStore()) {
+    const observer = new MutationObserver(() => { if (findStore()) observer.disconnect(); });
+    observer.observe(document.documentElement, { childList: true, subtree: true });
+  }
+}
+
+async function styleWorkspaceFrame(url, parentOrigins, contextId) {
   const client = new CDP(url);
   try {
     await client.ready;
-    const result = await client.send("Runtime.evaluate", { returnByValue: true, expression: `(() => {
-      if (!document.head) return false;
+    const result = await client.send("Runtime.evaluate", { ...(contextId ? { contextId } : {}), returnByValue: true, expression: `(() => {
+      if (window === window.top || !document.head) return false;
       (${followWorkspaceTheme.toString()})(${JSON.stringify(parentOrigins)});
       (${installWorkspaceReadiness.toString()})(${JSON.stringify(parentOrigins)});
+      (${followWorkspaceCatalog.toString()})(${JSON.stringify(parentOrigins)});
       if (globalThis.__gravRelayWorkspaceActions) return true;
       const style = document.getElementById("agy-embedded-workspace-style") ?? document.createElement("style");
       style.id = "agy-embedded-workspace-style";
@@ -865,19 +1017,23 @@ async function styleWorkspaceFrame(url, parentOrigins) {
 async function attach(url, allowedPorts) {
   const client = new CDP(url);
   let context, generation = 0, requests = 0;
+  const childContexts = new Map(), frameURLs = new Map(), styledChildren = new Set();
+  let rootFrameId;
 
   async function mount(frame) {
     const expected = ++generation;
     context = undefined;
+    frameURLs.set(frame.id, frame.url);
     if (frame.parentId) return;
     const local = localPage(frame.url, await allowedPorts(frame.url));
+    if (local) frontendOrigin = new URL(frame.url).origin;
+    rootFrameId = frame.id;
     const host = local ? "" : await workspaceHost(frame.url);
     if (!local && !host) return;
     const { executionContextId } = await client.send("Page.createIsolatedWorld", {
       frameId: frame.id, worldName: world, grantUniveralAccess: false,
     });
     if (generation !== expected) return;
-    await client.send("Runtime.addBinding", { name: binding, executionContextId });
     if (generation !== expected) return;
     context = executionContextId;
     const source = fs.readFileSync(panelPath, "utf8");
@@ -885,14 +1041,21 @@ async function attach(url, allowedPorts) {
       expression: "globalThis.__agyConnectionsRemoteHost = " + JSON.stringify(host) + ";\n" + source,
       contextId: context,
     });
-    if (evaluation.exceptionDetails) throw new Error("cannot mount settings");
+    if (evaluation.exceptionDetails) throw new Error("Cannot mount SSH panel: " + (evaluation.exceptionDetails.exception?.description?.split("\\n")[0] ?? evaluation.exceptionDetails.text));
   }
 
   try {
     await client.ready;
+    await client.send("Page.addScriptToEvaluateOnNewDocument", { source: "(" + installCLIFrontend.toString() + ")();" });
+    client.events.set("Runtime.executionContextCreated", ({ context: child }) => {
+      if (child.auxData?.isDefault) childContexts.set(child.id, child);
+    });
+    client.events.set("Runtime.executionContextDestroyed", ({ executionContextId }) => {
+      childContexts.delete(executionContextId); styledChildren.delete(executionContextId);
+    });
     client.events.set("Runtime.bindingCalled", packet => {
       if (packet.name !== binding || packet.executionContextId !== context ||
-          packet.payload.length > 9000 || requests > 7) return;
+          packet.payload.length > 262144 || requests > 7) return;
       let message;
       try { message = JSON.parse(packet.payload); } catch { return; }
       if (!Number.isSafeInteger(message?.id) || typeof message.action !== "string") return;
@@ -911,14 +1074,26 @@ async function attach(url, allowedPorts) {
       }).catch(() => {}).finally(() => { requests--; });
     });
     client.events.set("Page.frameNavigated", ({ frame }) => {
+      frameURLs.set(frame.id, frame.url);
       if (!frame.parentId) mount(frame).catch(() => {});
     });
     await client.send("Page.enable");
     await client.send("Runtime.enable");
+    await client.send("Runtime.addBinding", { name: binding, executionContextName: world });
     const { frameTree } = await client.send("Page.getFrameTree");
+    const remember = tree => { frameURLs.set(tree.frame.id, tree.frame.url); for (const child of tree.childFrames ?? []) remember(child); };
+    remember(frameTree);
     await mount(frameTree.frame);
     return {
       client,
+      async refreshFrames() {
+        for (const child of childContexts.values()) {
+          if (child.auxData.frameId === rootFrameId || styledChildren.has(child.id)) continue;
+          const address = frameURLs.get(child.auxData.frameId);
+          if (!address || !(await workspaceHost(address))) continue;
+          if (await styleWorkspaceFrame(url, [frontendOrigin], child.id).catch(() => false)) styledChildren.add(child.id);
+        }
+      },
       async remove() {
         if (context) {
           await client.send("Runtime.evaluate", {
@@ -937,6 +1112,7 @@ async function attach(url, allowedPorts) {
 async function main() {
   const parent = (await processRows()).find(row => row.command === binary);
   if (!parent) return;
+  appPID = parent.pid;
   const version = (await run("/usr/bin/plutil", ["-extract", "CFBundleShortVersionString", "raw",
     path.join(original, "Contents/Info.plist")], { timeout: 2500 })).stdout.trim();
   if (version !== compatibility.appVersion) return;
@@ -997,6 +1173,7 @@ async function main() {
           if (!localPage(target.url, await allowedPorts(target.url)) && !(await workspaceHost(target.url))) continue;
           try { attached.set(target.id, await attach(ws.href, allowedPorts)); } catch {}
         }
+        await Promise.allSettled([...attached.values()].map(entry => entry.refreshFrames()));
         for (const id of styledFrames.keys()) if (!targets.some(target => target.id === id)) styledFrames.delete(id);
         for (const [id, entry] of attached) {
           if (!targets.some(target => target.id === id)) {
@@ -1010,7 +1187,7 @@ async function main() {
   } finally {
     clearInterval(connectionTimer);
     await Promise.allSettled([...attached.values()].map(entry => entry.remove()));
-    await Promise.allSettled([...masters.keys()].map(disconnectHost));
+    await Promise.allSettled([...masters].filter(([, state]) => state.child).map(([host]) => disconnectHost(host)));
   }
 }
 

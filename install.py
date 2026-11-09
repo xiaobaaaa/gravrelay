@@ -17,9 +17,9 @@ import time
 ROOT = Path(__file__).resolve().parent
 SOURCE = ROOT / 'runtime'
 COMPATIBILITY = json.loads((SOURCE / 'compatibility.json').read_text())
-RELEASE = '0.1.8'
+RELEASE = '0.2.0'
 LABEL = 'local.antigravity.ssh-settings'
-RUNTIME = ('agent.cjs', 'panel.js', 'connect.py', 'switch-project.py', 'compatibility.json')
+RUNTIME = ('agent.cjs', 'panel.js', 'connect.py', 'switch-project.py', 'transport.py', 'remote_cli.py', 'cli-frontend.cjs', 'compatibility.json')
 
 
 class InstallError(RuntimeError):
@@ -154,11 +154,8 @@ def install(home, domain, file, app, node, proxy_port):
     profile = home / 'Library/Application Support/Antigravity/DevToolsActivePort'
     settings = home / 'Library/Application Support/Antigravity SSH Settings'
     env = {'AGY_SSH_APP': str(app), 'AGY_SSH_PYTHON': str(Path(sys.executable).resolve())}
-    previous_port = (plistlib.loads(old).get('EnvironmentVariables', {}).get('AGY_SSH_PROXY_PORT') if old else None)
-    if proxy_port is not None:
-        env['AGY_SSH_PROXY_PORT'] = str(proxy_port)
-    elif previous_port:
-        env['AGY_SSH_PROXY_PORT'] = previous_port
+    if proxy_port not in (None, 0):
+        raise InstallError('CLI mode needs a proxy on the SSH host; a reverse Mac proxy cannot keep remote tasks connected when the Mac disconnects.')
     plist = {
         'Label': LABEL,
         'ProgramArguments': [str(node), str(destination / 'agent.cjs')],
@@ -207,7 +204,7 @@ def main():
     parser.add_argument('action', choices=('install', 'doctor', 'uninstall'), nargs='?', default='install')
     parser.add_argument('--app', type=Path, help='path to Antigravity.app')
     parser.add_argument('--node', type=Path, help='path to the Node.js executable')
-    parser.add_argument('--proxy-port', type=parse_port, help='optional local HTTP proxy port, or 0 to disable')
+    parser.add_argument('--proxy-port', type=parse_port, help='legacy option; CLI mode accepts only 0 and uses the SSH host network')
     args = parser.parse_args()
     if platform.system() != 'Darwin' or os.getuid() == 0:
         raise InstallError('Run this from a normal macOS desktop account.')
