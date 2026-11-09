@@ -19,7 +19,7 @@ sh install.sh
 You can also install directly from the release tag.
 
 ```sh
-git clone --branch v0.2.0 --depth 1 https://github.com/xiaobaaaa/gravrelay.git
+git clone --branch v0.2.1 --depth 1 https://github.com/xiaobaaaa/gravrelay.git
 cd gravrelay
 sh install.sh
 ```
@@ -35,6 +35,8 @@ agy acp --login
 GravRelay configures a private local connection token and starts the official CLI background service when needed. An existing CLI service that predates this setup needs a one-time restart after its tasks finish. The app reports this instead of restarting active work.
 
 Once the host is connected, choose **Projects → New SSH Project**. Select the host and folder in the folder picker. Saved projects and conversations load automatically after their host connects. The remote CLI uses its own signed-in account and settings.
+
+The message box uses Antigravity's native permissions picker. It changes the SSH host's default preset, or the project's preset when that project has an override. Available options follow the remote host's sandbox support. GravRelay does not change the selected preset during installation, and does not enable experimental conversation-scoped overrides that the CLI backend rejects.
 
 Hover over a project or conversation for its shortcuts and options. SSH projects support copying the project name, opening Project Settings, starting a conversation, and deleting the project. SSH conversations support renaming, pinning, marking read or unread, copying details, splitting, archiving, and deleting. Use the sidebar's **Display Options → Archived Only** to restore or permanently delete an archived conversation. Deleting a project removes its conversations on the SSH host and keeps the source folder.
 

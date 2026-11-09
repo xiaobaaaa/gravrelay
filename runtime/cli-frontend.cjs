@@ -86,6 +86,51 @@ function installCLIFrontend() {
   const retry = setInterval(announce, 150);
   announce();
   const fetch = window.fetch.bind(window);
+  const jsonUnaryMethods = new Set(['JetboxWriteState', 'UpdateConversationAnnotations', 'UpdateProject']);
+  function grpcFrame(flags, bytes) {
+    const frame = new Uint8Array(bytes.length + 5);
+    frame[0] = flags;
+    new DataView(frame.buffer).setUint32(1, bytes.length);
+    frame.set(bytes, 5);
+    return frame;
+  }
+  async function jsonUnary(config, url, request, headers, body) {
+    const bytes = new Uint8Array(body);
+    if (bytes.length < 5 || bytes[0] !== 0 ||
+        new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(1) !== bytes.length - 5)
+      throw new Error('Unsupported unary RPC framing.');
+    const payload = bytes.slice(5);
+    headers.set('Content-Type', 'application/json');
+    headers.set('Connect-Protocol-Version', '1');
+    headers.delete('X-Grpc-Web');
+    const response = await fetch(config.origin + url.pathname + url.search, {
+      method: request.method, headers, body: payload, signal: request.signal,
+      credentials: 'omit', mode: 'cors', redirect: 'error',
+    });
+    const text = await response.text();
+    const codes = { canceled: 1, unknown: 2, invalid_argument: 3, deadline_exceeded: 4,
+      not_found: 5, already_exists: 6, permission_denied: 7, resource_exhausted: 8,
+      failed_precondition: 9, aborted: 10, out_of_range: 11, unimplemented: 12,
+      internal: 13, unavailable: 14, data_loss: 15, unauthenticated: 16 };
+    let status = 0, message = '', data = text || '{}';
+    if (!response.ok) {
+      let error;
+      try { error = JSON.parse(text); } catch { error = {}; }
+      status = codes[error.code] ?? (response.status === 401 ? 16 : response.status === 403 ? 7 : 2);
+      message = error.message || 'The remote RPC failed.';
+    } else {
+      JSON.parse(data);
+    }
+    const encoder = new TextEncoder();
+    const trailers = grpcFrame(128, encoder.encode('grpc-status: ' + status + '\r\n' +
+      (message ? 'grpc-message: ' + encodeURIComponent(message) + '\r\n' : '')));
+    const result = status ? trailers : (() => {
+      const frame = grpcFrame(0, encoder.encode(data));
+      const value = new Uint8Array(frame.length + trailers.length);
+      value.set(frame); value.set(trailers, frame.length); return value;
+    })();
+    return new Response(result, { status: 200, headers: { 'Content-Type': 'application/grpc-web+json' } });
+  }
   window.fetch = async function(input, init) {
     const url = new URL(input instanceof Request ? input.url : String(input), location.href);
     if (url.origin !== location.origin || !url.pathname.startsWith('/exa.')) return fetch(input, init);
@@ -96,6 +141,9 @@ function installCLIFrontend() {
     headers.delete('Authorization');
     const body = ['GET', 'HEAD'].includes(request.method) ? undefined : await request.arrayBuffer();
     globalThis.__gravRelayCLIFrontend.requests++;
+    if (jsonUnaryMethods.has(url.pathname.split('/').pop()) &&
+        headers.get('Content-Type')?.split(';')[0].trim().toLowerCase() === 'application/grpc-web+json')
+      return jsonUnary(config, url, request, headers, body);
     return fetch(config.origin + url.pathname + url.search, {
       method: request.method, headers, body, signal: request.signal,
       credentials: 'omit', mode: 'cors', redirect: 'error',

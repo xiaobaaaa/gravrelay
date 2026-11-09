@@ -11,6 +11,7 @@ const { isIP } = require("node:net");
 const run = promisify(execFile);
 const compatibility = require("./compatibility.json");
 const installCLIFrontend = require("./cli-frontend.cjs");
+const installNativePermissions = require("./permissions.cjs");
 const original = process.env.AGY_SSH_APP || "/Applications/Antigravity.app";
 const python = process.env.AGY_SSH_PYTHON || "/usr/bin/python3";
 const binary = original + "/Contents/MacOS/Antigravity";
@@ -900,6 +901,7 @@ async function styleWorkspaceFrame(url, parentOrigins, contextId) {
     await client.ready;
     const result = await client.send("Runtime.evaluate", { ...(contextId ? { contextId } : {}), returnByValue: true, expression: `(() => {
       if (window === window.top || !document.head) return false;
+      (${installNativePermissions.toString()})();
       (${followWorkspaceTheme.toString()})(${JSON.stringify(parentOrigins)});
       (${installWorkspaceReadiness.toString()})(${JSON.stringify(parentOrigins)});
       (${followWorkspaceCatalog.toString()})(${JSON.stringify(parentOrigins)});
