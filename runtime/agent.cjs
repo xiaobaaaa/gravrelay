@@ -158,7 +158,7 @@ async function addManualHost(message) {
 
 const ssh = "/usr/bin/ssh";
 const sshOptions = ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
-  "-o", "ConnectTimeout=8", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3",
+  "-o", "ConnectTimeout=20", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3",
   "-o", "ForwardAgent=no", "-o", "ForwardX11=no", "-o", "PermitLocalCommand=no",
   "-o", "ClearAllForwardings=yes"];
 
@@ -193,7 +193,8 @@ async function connectHost(host) {
       state.child.once("exit", () => {
         if (masters.get(host) === state) markDisconnected(state);
       });
-      for (let count = 0; count < 24 && state.status === "connecting"; count++) {
+      const deadline = Date.now() + 60000;
+      while (Date.now() < deadline && state.status === "connecting") {
         if (masters.get(host) !== state || stop) return;
         if (await checkMaster(host)) {
           state.status = "connected";
@@ -322,7 +323,8 @@ async function workspacePort(project) {
       child.once("error", () => { exited = true; });
       child.once("exit", () => { exited = true; });
       child.unref();
-      for (let attempt = 0; attempt < 100 && !exited; attempt++) {
+      const deadline = Date.now() + 180000;
+      while (Date.now() < deadline && !exited) {
         await pause(600);
         const port = await verifiedWorkspacePort(host);
         if (port) return port;

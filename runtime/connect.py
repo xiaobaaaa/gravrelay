@@ -34,7 +34,7 @@ PROXY_PORT = int(os.environ.get('AGY_SSH_PROXY_PORT', '0'))
 BACKEND_CERT_SPKI = COMPATIBILITY['linuxX64']['tlsSpki']
 ARTIFACT = COMPATIBILITY['linuxX64']['url']
 SHA256 = COMPATIBILITY['linuxX64']['sha256']
-SSH = ['/usr/bin/ssh', '-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8',
+SSH = ['/usr/bin/ssh', '-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=20',
        '-o', 'ServerAliveInterval=10', '-o', 'ServerAliveCountMax=3',
        '-o', 'ForwardAgent=no', '-o', 'ForwardX11=no', '-o', 'PermitLocalCommand=no',
        '-o', 'ControlMaster=no', '-o', 'ControlPath=none', '-o', 'GatewayPorts=no']
@@ -96,7 +96,7 @@ def managed_ssh_config(host):
     return ['-F', str(path)]
 
 
-def remote(host, command, timeout=12):
+def remote(host, command, timeout=30):
     result = subprocess.run([*SSH_COMMAND, *managed_ssh_config(host), host, command], text=True, capture_output=True,
                             timeout=timeout)
     if result.returncode:
@@ -300,6 +300,77 @@ def connect(host, directory, probe, project_spec=None, start_only=False):
         terminate(proxy)
 
 
+def existing_workspace_port(host, server):
+    code = r'''
+import base64, hashlib, json, os, re, socket, ssl, subprocess, sys
+from pathlib import Path
+server, profile, digest, fingerprint = sys.argv[1:]
+for process in Path('/proc').iterdir():
+    if not process.name.isdecimal():
+        continue
+    try:
+        if process.stat().st_uid != os.getuid():
+            continue
+        executable = os.readlink(process / 'exe')
+        if executable.removesuffix(' (deleted)') != server:
+            continue
+        args = (process / 'cmdline').read_bytes().split(b'\0')
+        if b'--app_data_dir' not in args or args[args.index(b'--app_data_dir') + 1].decode() != profile:
+            continue
+        sha = hashlib.sha256()
+        with (process / 'exe').open('rb') as binary:
+            for chunk in iter(lambda: binary.read(1024 * 1024), b''):
+                sha.update(chunk)
+        if sha.hexdigest() != digest:
+            continue
+        inodes = set()
+        for descriptor in (process / 'fd').iterdir():
+            try:
+                link = os.readlink(descriptor)
+                if re.fullmatch(r'socket:\[\d+\]', link):
+                    inodes.add(link[8:-1])
+            except OSError:
+                pass
+        ports = set()
+        for table in ('tcp', 'tcp6'):
+            for line in (process / 'net' / table).read_text().splitlines()[1:]:
+                fields = line.split()
+                if fields[3] == '0A' and fields[9] in inodes:
+                    ports.add(int(fields[1].rsplit(':', 1)[1], 16))
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        for port in sorted(ports):
+            try:
+                with socket.create_connection(('127.0.0.1', port), timeout=2) as stream:
+                    with context.wrap_socket(stream, server_hostname='localhost') as secured:
+                        certificate = ssl.DER_cert_to_PEM_cert(secured.getpeercert(binary_form=True))
+                        public = subprocess.check_output(['openssl', 'x509', '-pubkey', '-noout'], input=certificate.encode(), stderr=subprocess.DEVNULL)
+                        key = subprocess.check_output(['openssl', 'pkey', '-pubin', '-outform', 'DER'], input=public, stderr=subprocess.DEVNULL)
+                        if base64.b64encode(hashlib.sha256(key).digest()).decode() != fingerprint:
+                            continue
+                        secured.sendall(b'GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n')
+                        received = b''
+                        while len(received) < 100000:
+                            part = secured.recv(16384)
+                            if not part:
+                                break
+                            received += part
+                            if b'csrfToken' in received:
+                                print(json.dumps({'port': port}))
+                                raise SystemExit(0)
+            except (OSError, subprocess.SubprocessError):
+                continue
+    except (OSError, IndexError, UnicodeError):
+        continue
+print('null')
+'''
+    result = json.loads(remote(host, shlex.join([
+        'python3', '-c', code, server, APP_DATA, SHA256, BACKEND_CERT_SPKI,
+    ]), timeout=60))
+    return result['port'] if result else None
+
+
 def run_backend(host, directory, server, proxy_url, probe, project_spec=None, start_only=False):
     csrf = secrets.token_urlsafe(28)
     argv = [server, '--standalone', '--override_ide_name', 'antigravity',
@@ -335,13 +406,16 @@ def run_backend(host, directory, server, proxy_url, probe, project_spec=None, st
     Thread(target=parse, daemon=True).start()
     try:
         try:
-            event, remote_port = events.get(timeout=35)
+            event, remote_port = events.get(timeout=90)
         except Empty:
             raise RuntimeError('The remote Antigravity workspace did not start in time.') from None
         if event != 'port':
-            if backend.wait(timeout=2) == 75:
-                raise RuntimeError('This host already has an Antigravity SSH workspace.')
-            raise RuntimeError('The remote Antigravity workspace could not start.')
+            if backend.wait(timeout=2) != 75:
+                raise RuntimeError('The remote Antigravity workspace could not start.')
+            remote_port = existing_workspace_port(host, server)
+            if remote_port is None:
+                raise RuntimeError('The existing SSH workspace is not responding yet. Reconnecting.')
+            backend = None
         listeners(host, remote_port)
         certificate = remote(
             host,
@@ -387,8 +461,9 @@ def run_backend(host, directory, server, proxy_url, probe, project_spec=None, st
         session_status(host, directory, 'Connected', port)
         print('READY', flush=True)
         next_probe = time.monotonic() + 10
+        transport_failures = 0
         while True:
-            if backend.poll() is not None:
+            if backend is not None and backend.poll() is not None:
                 raise RuntimeError(f'The SSH session to {host} disconnected.')
             if time.monotonic() >= next_probe:
                 new_port, replacement = refresh_forward(host, port, remote_port, tunnel, context)
@@ -396,6 +471,10 @@ def run_backend(host, directory, server, proxy_url, probe, project_spec=None, st
                     retired_tunnels.append(tunnel)
                     tunnel, port = replacement, new_port
                     session_status(host, directory, 'Connected', port)
+                if backend is None:
+                    transport_failures = 0 if tunnel_ready(port, context) else transport_failures + 1
+                    if transport_failures >= 3:
+                        raise RuntimeError('The attached workspace needs a new connection.')
                 next_probe = time.monotonic() + 10
             try:
                 event, value = events.get(timeout=0.4)

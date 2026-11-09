@@ -17,7 +17,7 @@ sh install.sh
 You can also install directly from the release tag.
 
 ```sh
-git clone --branch v0.1.7 --depth 1 https://github.com/xiaobaaaa/gravrelay.git
+git clone --branch v0.1.8 --depth 1 https://github.com/xiaobaaaa/gravrelay.git
 cd gravrelay
 sh install.sh
 ```
