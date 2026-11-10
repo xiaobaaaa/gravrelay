@@ -42,13 +42,19 @@ class GitHub:
         return result.stdout
 
     def release(self, tag):
-        result = subprocess.run(['gh', 'api', 'repos/' + self.repo + '/releases/tags/' + tag],
+        # REST releases/tags only resolves published releases. The CLI also
+        # finds drafts, which must be verified before they become public.
+        result = subprocess.run(['gh', 'release', 'view', tag, '--repo', self.repo,
+                                 '--json', 'isDraft,targetCommitish,assets'],
                                 capture_output=True, text=True)
-        if result.returncode and 'HTTP 404' in result.stderr:
+        if result.returncode and ('release not found' in result.stderr.lower() or
+                                  'HTTP 404' in result.stderr):
             return None
         if result.returncode:
             raise PublishError(result.stderr.strip() or 'Cannot query the release.')
-        return json.loads(result.stdout)
+        release = json.loads(result.stdout)
+        return {'draft': release['isDraft'], 'target_commitish': release['targetCommitish'],
+                'assets': release['assets']}
 
     def create(self, tag, commit):
         self.command('release', 'create', tag, '--repo', self.repo, '--verify-tag', '--draft',

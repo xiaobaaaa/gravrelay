@@ -7,6 +7,8 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
+from types import SimpleNamespace
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -189,3 +191,23 @@ class PublishTests(ReleaseFixture):
             self.publish(github)
         self.assertTrue(github.value['draft'])
         self.assertEqual(github.operations, ['create-draft', 'upload'])
+
+
+class GitHubAdapterTests(unittest.TestCase):
+    def test_draft_lookup_uses_the_draft_aware_cli_and_maps_fields(self):
+        response = {'isDraft': True, 'targetCommitish': 'source-commit', 'assets': []}
+        with patch.object(publisher.subprocess, 'run', return_value=SimpleNamespace(
+                returncode=0, stdout=json.dumps(response), stderr='')) as run:
+            release = publisher.GitHub('owner/repo').release('v1.2.3')
+        self.assertEqual(release, {'draft': True, 'target_commitish': 'source-commit', 'assets': []})
+        self.assertEqual(run.call_args.args[0][:4], ['gh', 'release', 'view', 'v1.2.3'])
+
+    def test_missing_release_is_distinct_from_an_authentication_failure(self):
+        github = publisher.GitHub('owner/repo')
+        with patch.object(publisher.subprocess, 'run', return_value=SimpleNamespace(
+                returncode=1, stdout='', stderr='release not found')):
+            self.assertIsNone(github.release('v1.2.3'))
+        with patch.object(publisher.subprocess, 'run', return_value=SimpleNamespace(
+                returncode=1, stdout='', stderr='HTTP 403: access denied')):
+            with self.assertRaises(publisher.PublishError):
+                github.release('v1.2.3')
