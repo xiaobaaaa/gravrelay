@@ -4,7 +4,7 @@ function installRemoteFiles() {
   if (!host || globalThis.__gravRelayCLIFrontend?.host !== host ||
       globalThis.__gravRelayRemoteFiles) return;
   let disposed = false, timer;
-  const featuresChanged = new Map(), bars = new Map(), pending = new Set();
+  const featuresChanged = new Map(), fileSystemsChanged = new Map(), bars = new Map(), pending = new Set();
   const style = document.createElement('style');
   style.textContent = '[data-gravrelay-file-shell]{position:relative;display:flex!important;flex-direction:column;min-height:0}' +
     '[data-gravrelay-file-shell]>:not([data-gravrelay-file-toolbar]){min-height:0;flex:1}' +
@@ -29,14 +29,19 @@ function installRemoteFiles() {
   }
   function providers(doc) {
     let features, reader;
+    const fileSystems = [];
     for (let f = fiber(doc.querySelector('[data-testid="sidebar-split"]')), n = 0;
          f && n < 400; f = f.return, n++) {
       const value = f.memoizedProps?.value;
       if (typeof value?.get === 'function' && typeof value.getCache?.set === 'function' &&
           Array.isArray(value.featureNames)) features = value;
       if (typeof value?.readFile === 'function') reader = value;
+      if (typeof value?.entries === 'function' && typeof value?.get === 'function') {
+        for (const [, provider] of value.entries()) if (typeof provider?.stat === 'function' &&
+            typeof provider?.readFile === 'function' && provider.lsClient) fileSystems.push(provider);
+      }
     }
-    return { features, reader };
+    return { features, reader, fileSystems };
   }
   function parentDownload() {
     const download = providers(window.parent.document).features?.get('download');
@@ -60,6 +65,20 @@ function installRemoteFiles() {
     // Our parent is the local app, so use that app's own download service.
     features.getCache.set('download', download);
   }
+  function patchFileSystem(provider) {
+    if (fileSystemsChanged.has(provider)) return;
+    const original = provider.stat;
+    const replacement = async function(uri, options) {
+      const stat = await original.call(this, uri, options);
+      // CLI StatUri omits inline contents. Protobuf decodes that omission as an
+      // empty Uint8Array; the desktop viewer otherwise mistakes it for a full
+      // file and skips ReadFile. Preserve genuine zero-byte files and limits.
+      return supportedUri(String(uri)) && (stat?.type & 1) === 1 && stat.size > 0 && stat.content?.byteLength === 0
+        ? {...stat, content:undefined} : stat;
+    };
+    provider.stat = replacement;
+    fileSystemsChanged.set(provider, {original, replacement, refreshed:new Set()});
+  }
   function firstElement(f) {
     if (f.stateNode?.nodeType === 1) return f.stateNode;
     for (let child = f.child; child; child = child.sibling) {
@@ -79,7 +98,7 @@ function installRemoteFiles() {
           let conversation;
           for (let f = current, n = 0; f && n < 70; f = f.return, n++) {
             const p = f.memoizedProps;
-            const candidate = p?.cascadeId ?? p?.conversationId ??
+            const candidate = p?.cascadeId ?? p?.conversationId ?? p?.value?.conversationId ??
               (p?.treeId?.kind === 'cascadeId' ? p.treeId.cascadeId : undefined);
             if (typeof candidate === 'string' && /^[0-9a-f-]{36}$/i.test(candidate)) {
               conversation = candidate; break;
@@ -190,14 +209,14 @@ function installRemoteFiles() {
         label.textContent = pageNumber + ' / ' + pdf.numPages;
         previous.disabled = pageNumber === 1; next.disabled = pageNumber === pdf.numPages;
         minus.disabled = scale <= .5; plus.disabled = scale >= 3;
-      } catch (error) { if (error?.name !== 'RenderingCancelledException') fail(error); }
+      } catch (error) { if (current === sequence && error?.name !== 'RenderingCancelledException') fail(error); }
     }
     (async () => {
       const reader = providers(document).reader;
       if (!reader) throw new Error('The SSH file service is not ready.');
       const result = await reader.readFile({uri, conversationId:conversation, userInitiated:true});
       if (cancelled) return;
-      if (!result?.content || result.content.byteLength > 48 * 1024 * 1024)
+      if (!result?.content || result.content.byteLength > 20 * 1024 * 1024)
         throw new Error('This PDF is too large for inline preview.');
       const library = await import(new URL('/workers/pdf.min.mjs', location.origin).href);
       if (cancelled) return;
@@ -207,7 +226,7 @@ function installRemoteFiles() {
       if (cancelled) { pdf.destroy(); return; }
       await render();
     })().catch(fail);
-    return {dispose() {
+    return {element:placeholder,dispose() {
       cancelled = true; sequence++; task?.cancel();
       if (pdf) pdf.destroy(); else loading?.destroy();
       viewer.remove(); placeholder.removeAttribute('data-gravrelay-pdf-host'); placeholder.style.opacity = oldOpacity;
@@ -216,7 +235,9 @@ function installRemoteFiles() {
   function apply() {
     timer = null;
     if (disposed) return;
-    patch(providers(document).features);
+    const context = providers(document);
+    patch(context.features);
+    context.fileSystems.forEach(patchFileSystem);
     const panes = filePanes();
     for (const [element, record] of bars) {
       if (!panes.has(element) || !supportedUri(panes.get(element).uri)) {
@@ -227,13 +248,21 @@ function installRemoteFiles() {
       if (!supportedUri(item.uri)) continue;
       let record = bars.get(element);
       if (!record) { record = makeBar(element); bars.set(element, record); }
-      if (record.uri !== item.uri) { record.preview?.dispose(); record.preview = null; }
+      if (record.uri !== item.uri || record.conversation !== item.conversation || record.preview && !record.preview.element.isConnected) { record.preview?.dispose(); record.preview = null; }
       Object.assign(record, item);
       const title = host + ':' + decodeURIComponent(new URL(item.uri).pathname);
       if (record.source.title !== title) record.source.title = title;
       const placeholder = element.querySelector('[data-testid="binary-file-no-preview"],[data-testid="artifact-no-preview"]');
+      if (record.preview && record.preview.element !== placeholder) { record.preview.dispose(); record.preview = null; }
       if (placeholder && /\.pdf$/i.test(new URL(item.uri).pathname) && !record.preview)
         record.preview = previewPDF(placeholder, item);
+      for (const [provider, change] of fileSystemsChanged) {
+        const key = (item.conversation || '') + '\0' + item.uri;
+        if (!change.refreshed.has(key)) {
+          change.refreshed.add(key);
+          provider.onDidChangeFileEmitter?.fire([{resource:item.uri,conversationId:item.conversation}]);
+        }
+      }
     }
   }
   const observer = new MutationObserver(() => {
@@ -241,6 +270,7 @@ function installRemoteFiles() {
   });
   function nativeFallbackDownload(event) {
     const button = event.target?.closest?.('button');
+    if (button?.closest('[data-gravrelay-pdf]')) return;
     if (!button?.closest('[data-testid="binary-file-no-preview"],[data-testid="artifact-no-preview"]')) return;
     for (const [element, record] of bars) if (element.contains(button)) {
       event.preventDefault(); event.stopImmediatePropagation(); record.button.click(); break;
@@ -249,7 +279,7 @@ function installRemoteFiles() {
   document.addEventListener?.('click', nativeFallbackDownload, true);
   observer.observe(document.documentElement, {childList:true, subtree:true});
   globalThis.__gravRelayRemoteFiles = {
-    version:1,
+    version:2,
     remove() {
       disposed = true; clearTimeout(timer); observer.disconnect(); style.remove();
       document.removeEventListener?.('click', nativeFallbackDownload, true);
@@ -260,6 +290,8 @@ function installRemoteFiles() {
       for (const [features, previous] of featuresChanged) {
         if (features.getCache.get('download') === download) features.getCache.set('download', previous.download);
       }
+      for (const [provider, change] of fileSystemsChanged)
+        if (provider.stat === change.replacement) provider.stat = change.original;
       delete globalThis.__gravRelayRemoteFiles;
     },
   };

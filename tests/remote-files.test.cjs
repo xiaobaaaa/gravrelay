@@ -21,7 +21,7 @@ class Element {
 
 function fixture({ top = false, host = 'devbox', frontendHost = host,
   uri = 'file:///home/user/project/report%20one.pdf',
-  conversation = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', read, downloader } = {}) {
+  conversation = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', read, downloader, statResult } = {}) {
   const calls = [], saves = [], root = new Element(), pane = new Element(), head = new Element('head');
   const oldDownload = { downloadBlob() { throw Error('CLI host download must not be used'); } };
   const cache = new Map([['pdfViewer', false], ['download', oldDownload]]);
@@ -29,7 +29,11 @@ function fixture({ top = false, host = 'devbox', frontendHost = host,
   const reader = { readFile: async value => {
     calls.push(value); return read ? read(value) : {content: vm.runInNewContext('new Uint8Array([37,80,68,70,45])')};
   } };
-  const values = {memoizedProps: {value: features}, return: {memoizedProps: {value: reader}, return: null}};
+  const stats = [], refreshes = [];
+  const originalStat = async (uri, options) => { stats.push({uri, options}); return statResult ?? {type:1,size:5,content:new Uint8Array()}; };
+  const fileSystem = {stat:originalStat,readFile:reader.readFile,lsClient:{},onDidChangeFileEmitter:{fire: value=>refreshes.push(value)}};
+  const fsContext = {memoizedProps:{value:new Map([['',fileSystem]])},return:null};
+  const values = {memoizedProps: {value: features}, return: {memoizedProps: {value: reader}, return: fsContext}};
   const outer = { memoizedProps: {cascadeId: conversation}, return: values };
   const file = {memoizedProps: {fileUri: uri, tabId: 'file__one'}, stateNode: pane, return: outer};
   outer.child = file;
@@ -42,14 +46,15 @@ function fixture({ top = false, host = 'devbox', frontendHost = host,
   const parent = {document: {querySelector: () => parentRoot}};
   const window = {parent, top: parent}; if (top) window.top = window;
   let callback, scheduled, disconnected = false;
-  const document = {head, documentElement: new Element('html'), createElement: tag => new Element(tag), createElementNS: (_,tag) => new Element(tag), querySelector: () => root};
+  const documentEvents = new Map();
+  const document = {addEventListener:(name,fn)=>documentEvents.set(name,fn),removeEventListener:name=>documentEvents.delete(name),head, documentElement: new Element('html'), createElement: tag => new Element(tag), createElementNS: (_,tag) => new Element(tag), querySelector: () => root};
   const location = new URL('https://127.0.0.1:4000/c/11111111-2222-3333-4444-555555555555?__gravrelay_ssh=' + host);
   const context = vm.createContext({window, document, location, URL, Blob, __gravRelayCLIFrontend: {host: frontendHost},
     setTimeout(fn) { scheduled = fn; return 1; }, clearTimeout() { scheduled = null; },
     MutationObserver: class {constructor(fn) {callback = fn} observe() {} disconnect() {disconnected = true}}});
   vm.runInContext('(' + install.toString() + ')()', context);
   const toolbar = () => pane.children.find(x => x.hasAttribute('data-gravrelay-file-toolbar'));
-  return {context, cache, oldDownload, pane, head, file, features, calls, saves, toolbar,
+  return {context, cache, oldDownload, pane, head, file, features, calls, saves, toolbar, fileSystem, originalStat, stats, refreshes, documentEvents,
     mutate() { callback?.(); const fn = scheduled; scheduled = null; fn?.(); }, disconnected: () => disconnected};
 }
 
@@ -157,4 +162,46 @@ test('removing the add-on restores only its own changes and removes file chrome'
   assert.equal(x.pane.hasAttribute('data-gravrelay-file-shell'), false);
   assert.equal(x.head.children.length, 0);
   assert.equal(x.disconnected(), true);
+});
+
+
+test('omitted CLI inline contents fall back to ReadFile for nonempty files', async()=>{
+  const input={type:1,size:54,content:vm.runInNewContext('new Uint8Array()'),mtime:17};
+  const x=fixture({statResult:input}),options={conversationId:'own-session',maxContentBytes:20971520,userInitiated:true};
+  const result=await x.fileSystem.stat('file:///home/user/readme.md',options);
+  assert.equal(result.content,undefined);assert.equal(result.size,54);assert.equal(result.mtime,17);
+  assert.equal(input.content.byteLength,0);assert.equal(x.stats[0].options,options);
+});
+test('native empty files, directories, full inline bytes, and other schemes retain their original stat', async()=>{
+  for(const statResult of [{type:1,size:0,content:new Uint8Array()},{type:2,size:8,content:new Uint8Array()},{type:1,size:3,content:new Uint8Array([1,2,3])}]){
+    const x=fixture({statResult});assert.equal(await x.fileSystem.stat('file:///home/user/file',{}),statResult);
+  }
+  const statResult={type:1,size:8,content:new Uint8Array()},x=fixture({statResult});
+  assert.equal(await x.fileSystem.stat('https://example.test/file',{}),statResult);
+});
+test('cached blank native panes are refreshed once using their file conversation identity',()=>{
+  const x=fixture();assert.equal(x.refreshes.length,1);
+  assert.equal(x.refreshes[0][0].resource,'file:///home/user/project/report%20one.pdf');
+  assert.equal(x.refreshes[0][0].conversationId,'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
+  x.mutate();assert.equal(x.refreshes.length,1);
+});
+test('removal restores the native stat implementation and preserves a later replacement',()=>{
+  const x=fixture();assert.notEqual(x.fileSystem.stat,x.originalStat);x.context.__gravRelayRemoteFiles.remove();assert.equal(x.fileSystem.stat,x.originalStat);
+  const y=fixture(),newer=()=>{};y.fileSystem.stat=newer;y.context.__gravRelayRemoteFiles.remove();assert.equal(y.fileSystem.stat,newer);
+});
+
+
+test('native fallback downloads do not intercept PDF page and zoom controls',()=>{
+ const x=fixture(),handler=x.documentEvents.get('click');let stopped=0;
+ const button={closest:selector=>selector==='[data-gravrelay-pdf]'?{}:null};
+ handler({target:{closest:()=>button},preventDefault:()=>stopped++,stopImmediatePropagation:()=>stopped++});
+ assert.equal(stopped,0);assert.equal(x.calls.length,0);assert.equal(x.saves.length,0);
+});
+test('native unsupported-file download delegates to the host-scoped download action',async()=>{
+ const x=fixture(),handler=x.documentEvents.get('click');let stopped=0;
+ const button={closest:selector=>selector==='[data-gravrelay-pdf]'?null:{}};
+ x.pane.contains=value=>value===button;
+ handler({target:{closest:()=>button},preventDefault:()=>stopped++,stopImmediatePropagation:()=>stopped++});
+ await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(stopped,2);assert.equal(x.calls.length,1);assert.equal(x.saves[0].name,'report one.pdf');
 });
