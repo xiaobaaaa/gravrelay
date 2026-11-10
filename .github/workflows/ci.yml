@@ -23,7 +23,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          # Python 3.9 is not provided on Ubuntu 26.04.
+          - os: ubuntu-22.04
             node: '22'
             python: '3.9'
           - os: ubuntu-latest
