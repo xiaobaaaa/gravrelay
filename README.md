@@ -19,7 +19,7 @@ sh install.sh
 You can also install directly from the release tag.
 
 ```sh
-git clone --branch v0.2.2 --depth 1 https://github.com/xiaobaaaa/gravrelay.git
+git clone --branch v0.2.3 --depth 1 https://github.com/xiaobaaaa/gravrelay.git
 cd gravrelay
 sh install.sh
 ```
@@ -84,3 +84,16 @@ python3 tools/migrate_legacy.py
 ```
 
 After the old tasks finish, close the Mac app so its reconnect loop stays idle. Stop the old standalone backend and the CLI service, then run the helper with the apply flag and restart the official CLI service. It refuses to apply while either backend or another agy process is running. It preserves the source profile, backs up existing target files, checks copies and SQLite integrity, and handles committed SQLite WAL data. It copies conversation databases, annotations and artifacts; sign-in credentials are not copied.
+
+## Automated checks and releases
+
+CI runs syntax checks, JavaScript tests, Python tests, and release-package validation on Linux and macOS. It includes the minimum supported Node.js and Python versions and never installs Antigravity or starts remote services.
+
+- **Actions > Release > Run workflow** builds the ZIP, `SHA256SUMS`, and `release-manifest.json` as downloadable Actions artifacts. Manual runs never publish a public release.
+- Pushing a `vX.Y.Z` tag reruns CI, verifies the tag matches `install.py` and this README, builds the committed source, uploads and verifies the assets as a draft, then publishes it. Existing published assets are never overwritten.
+
+To release a version, update `RELEASE` in `install.py` and the clone tag in this README, commit, wait for CI, and push the matching tag. No npm account or extra publishing secret is required.
+
+To check the source package locally, commit tracked changes first, then run `python3 tools/build_release.py --output-dir dist`.
+
+The package is the existing source installer. A bundled graphical installer and npm distribution can be added separately.
