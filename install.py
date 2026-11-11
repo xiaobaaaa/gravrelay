@@ -17,9 +17,9 @@ import time
 ROOT = Path(__file__).resolve().parent
 SOURCE = ROOT / 'runtime'
 COMPATIBILITY = json.loads((SOURCE / 'compatibility.json').read_text())
-RELEASE = '0.2.4'
+RELEASE = '0.2.5'
 LABEL = 'local.antigravity.ssh-settings'
-RUNTIME = ('agent.cjs', 'panel.js', 'connect.py', 'switch-project.py', 'transport.py', 'remote_cli.py', 'cli-frontend.cjs', 'permissions.cjs', 'files.cjs', 'compatibility.json')
+RUNTIME = ('agent.cjs', 'panel.js', 'connect.py', 'switch-project.py', 'transport.py', 'remote_cli.py', 'cli-frontend.cjs', 'permissions.cjs', 'files.cjs', 'app-compatibility.cjs', 'compatibility.json')
 
 
 class InstallError(RuntimeError):
@@ -102,8 +102,11 @@ def app_version(app):
 
 def verify_app(app):
     version = app_version(app)
-    if version != COMPATIBILITY['appVersion']:
-        raise InstallError(f"This release supports Antigravity {COMPATIBILITY['appVersion']}. Found {version or 'unknown'}.")
+    versions = COMPATIBILITY.get('supportedAppVersions', [COMPATIBILITY['appVersion']])
+    if not isinstance(versions, list) or not versions or any(not isinstance(value, str) or not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', value) for value in versions):
+        raise InstallError('The supported application versions are invalid.')
+    if version not in versions:
+        raise InstallError(f"This release supports Antigravity {', '.join(versions)}. Found {version or 'unknown'}.")
     requirement = ('=anchor apple generic and identifier "' + COMPATIBILITY['bundleId']
                    + '" and certificate leaf[subject.OU] = "' + COMPATIBILITY['teamId'] + '"')
     if command('/usr/bin/codesign', '--verify', '--strict', '-R', requirement, str(app)).returncode:

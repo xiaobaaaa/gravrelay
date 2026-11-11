@@ -10,6 +10,7 @@ const { isIP } = require("node:net");
 
 const run = promisify(execFile);
 const compatibility = require("./compatibility.json");
+const {supportedAppVersions, isAppVersionSupported, installCompatibilityNotice} = require("./app-compatibility.cjs");
 const installCLIFrontend = require("./cli-frontend.cjs");
 const installNativePermissions = require("./permissions.cjs");
 const installRemoteFiles = require("./files.cjs");
@@ -1042,7 +1043,7 @@ async function attach(url, allowedPorts) {
     context = executionContextId;
     const source = fs.readFileSync(panelPath, "utf8");
     const evaluation = await client.send("Runtime.evaluate", {
-      expression: "globalThis.__agyConnectionsRemoteHost = " + JSON.stringify(host) + ";\n" + source,
+      expression: "globalThis.__agyConnectionsRemoteHost = " + JSON.stringify(host) + ";\ndocument.getElementById(\"gravrelay-compatibility-notice\")?.remove();\n" + source,
       contextId: context,
     });
     if (evaluation.exceptionDetails) throw new Error("Cannot mount SSH panel: " + (evaluation.exceptionDetails.exception?.description?.split("\\n")[0] ?? evaluation.exceptionDetails.text));
@@ -1119,9 +1120,13 @@ async function main() {
   appPID = parent.pid;
   const version = (await run("/usr/bin/plutil", ["-extract", "CFBundleShortVersionString", "raw",
     path.join(original, "Contents/Info.plist")], { timeout: 2500 })).stdout.trim();
-  if (version !== compatibility.appVersion) return;
+  const supported = isAppVersionSupported(compatibility, version);
+  persist(path.join(moduleData, "compatibility-status.json"), {schema: 1, state: "checking",
+    appVersion: version, supportedVersions: supportedAppVersions(compatibility), checkedAt: new Date().toISOString()});
   await run("/usr/bin/codesign", ["--verify", "--strict", "-R",
     `=anchor apple generic and identifier "${compatibility.bundleId}" and certificate leaf[subject.OU] = "${compatibility.teamId}"`, original], { timeout: 10000 });
+  persist(path.join(moduleData, "compatibility-status.json"), {schema: 1, state: supported ? "supported" : "unsupported",
+    appVersion: version, supportedVersions: supportedAppVersions(compatibility), checkedAt: new Date().toISOString()});
 
   let devtoolsPort;
   for (let count = 0; count < 6 && running(parent.pid) && !stop; count++) {
@@ -1143,6 +1148,32 @@ async function main() {
       rendererPorts = await loopbackPorts(children.map(row => row.pid));
     }
     return rendererPorts;
+  }
+
+  if (!supported) {
+    console.error("GravRelay needs an update for Antigravity " + version + ". Saved SSH data is preserved.");
+    while (running(parent.pid) && !stop) {
+      try {
+        const response = await fetch("http://127.0.0.1:" + devtoolsPort + "/json/list", {
+          redirect: "error", signal: AbortSignal.timeout(1800),
+        });
+        for (const target of await response.json()) {
+          if (target.type !== "page" || !target.webSocketDebuggerUrl ||
+              !localPage(target.url, await allowedPorts(target.url))) continue;
+          const ws = new URL(target.webSocketDebuggerUrl);
+          if (ws.protocol !== "ws:" || ws.hostname !== "127.0.0.1" || Number(ws.port) !== devtoolsPort ||
+              ws.pathname !== "/devtools/page/" + target.id) continue;
+          const client = new CDP(ws.href);
+          try {
+            await client.ready;
+            await client.send("Runtime.evaluate", {expression: "(" + installCompatibilityNotice.toString() + ")(" +
+              JSON.stringify(version) + "," + JSON.stringify(supportedAppVersions(compatibility)) + ")"});
+          } finally { client.close(); }
+        }
+      } catch {}
+      await pause(1700);
+    }
+    return;
   }
 
   const attached = new Map();

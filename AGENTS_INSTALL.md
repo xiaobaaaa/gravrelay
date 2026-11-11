@@ -4,7 +4,7 @@ These steps are for an agent that the user has asked to install GravRelay on the
 
 1. Confirm the Mac has Google Antigravity, Node.js 22 or newer, and Python 3.9 or newer.
 2. Download the [release ZIP](https://github.com/xiaobaaaa/gravrelay/releases/latest) and verify it against the release checksum. You can also clone the matching Git tag.
-3. From the extracted or cloned directory, run `sh install.sh doctor` to verify the signed Antigravity build and local dependencies. This release supports Antigravity 2.29.0.
+3. From the extracted or cloned directory, run `sh install.sh doctor` to verify the signed Antigravity build and local dependencies. Supported app versions are listed under `supportedAppVersions` in `runtime/compatibility.json`; keep the version and signature checks intact.
 4. Run `sh install.sh` and repeat the doctor check. An update requires Antigravity to be closed so its current work is preserved.
 5. In Antigravity, open **Settings → Connections**. Use the user's existing SSH alias, or ask for the hostname, username and port for **Add Manually**. The installed bridge starts with no preset hosts.
 6. On the selected SSH host, inspect its remote login shell for the official agy CLI. If missing, install it from https://antigravity.google/cli/install.sh following Google's official instructions. Keep its SHA-512 package verification. Sign in with agy acp --login. Use the existing browser session when appropriate; hand off passwords, MFA, and required user confirmations.
