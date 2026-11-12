@@ -5,6 +5,7 @@ const {supportedAppVersions,isAppVersionSupported,installCompatibilityNotice}=re
 test('only explicitly reviewed application versions are supported',()=>{
   assert.equal(isAppVersionSupported(compatibility,'2.29.0'),true);
   assert.equal(isAppVersionSupported(compatibility,'2.31.0'),true);
+  assert.equal(isAppVersionSupported(compatibility,'2.31.2'),true);
   for(const version of ['2.30.0','2.31.1','2.32.0','99.0.0',''])
     assert.equal(isAppVersionSupported(compatibility,version),false,version);
 });
