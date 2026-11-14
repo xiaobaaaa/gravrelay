@@ -39,7 +39,7 @@
       const timer = setTimeout(() => {
         pending.delete(id);
         reject(new Error("The SSH request timed out."));
-      }, action === "open" || action === "create" ? 90000 : action === "manage" ? 60000 : 45000);
+      }, action === "cliUpdate" ? 270000 : action === "open" || action === "create" ? 90000 : action === "manage" ? 60000 : 45000);
       pending.set(id, { resolve, reject, timer });
       globalThis.__agyConnectionsBridge(JSON.stringify({ id, action, ...args }));
     });
@@ -296,7 +296,36 @@
           state.append(node("span", "", "dot " + record.status), document.createTextNode(stateLabel[record.status]));
           detail.append(node("span", record.host, "host-name"), state);
           if (record.enabled && record.error) detail.append(node("div", record.error, "muted"));
+          if (record.cli) {
+            const cli = record.cli;
+            detail.append(node("div", "CLI " + (cli.runningVersion || "not running") +
+              " · Installed " + cli.installedVersion + " · Latest " + cli.latestVersion, "muted"));
+            if (cli.restartRequired) detail.append(node("div", "New CLI installed. Restart to apply after tasks finish.", "muted"));
+          }
           row.append(toggle, detail);
+          if (record.enabled) {
+            const check = button(record.cliBusy ? "Checking…" : "Check CLI", control => act(status, async () => {
+              await request("cliUpdate", {host:record.host, operation:"refresh"}); await refresh();
+            }, control));
+            check.disabled = record.cliBusy === true;
+            row.append(check);
+            if (record.cli?.updateAvailable) {
+              const update = button("Update CLI", control => act(status, async () => {
+                status.textContent = "Downloading and verifying the official CLI. Existing tasks keep running.";
+                await request("cliUpdate", {host:record.host, operation:"update"});
+                status.textContent = "CLI installed. Restart after tasks finish to apply it."; await refresh();
+              }, control));
+              update.disabled = record.cliBusy === true; row.append(update);
+            }
+            if (record.cli?.restartRequired) {
+              const restart = button("Restart CLI", control => act(status, async () => {
+                if (!window.confirm("Restart the remote CLI to apply its installed version? Running tasks must finish first. Scheduled timers may need to be resumed after restart.")) return;
+                await request("cliUpdate", {host:record.host, operation:"restart"});
+                status.textContent = "Remote CLI restarted. Reconnecting…"; await refresh();
+              }, control));
+              restart.disabled = record.cliBusy === true; row.append(restart);
+            }
+          }
           if (record.status === "failed") {
             row.append(button("Retry", control => act(status, async () => {
               await request("toggle", { host: record.host, enabled: true });

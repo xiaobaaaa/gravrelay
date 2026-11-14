@@ -17,9 +17,9 @@ import time
 ROOT = Path(__file__).resolve().parent
 SOURCE = ROOT / 'runtime'
 COMPATIBILITY = json.loads((SOURCE / 'compatibility.json').read_text())
-RELEASE = '0.2.7'
+RELEASE = '0.2.8'
 LABEL = 'local.antigravity.ssh-settings'
-RUNTIME = ('agent.cjs', 'panel.js', 'connect.py', 'switch-project.py', 'transport.py', 'remote_cli.py', 'cli-frontend.cjs', 'permissions.cjs', 'files.cjs', 'app-compatibility.cjs', 'compatibility.json')
+RUNTIME = ('agent.cjs', 'panel.js', 'connect.py', 'switch-project.py', 'transport.py', 'remote_cli.py', 'cli-frontend.cjs', 'permissions.cjs', 'files.cjs', 'app-compatibility.cjs', 'cli-updates.py', 'cli_update_remote.py', 'compatibility.json')
 
 
 class InstallError(RuntimeError):

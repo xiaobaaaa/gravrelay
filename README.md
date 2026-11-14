@@ -19,7 +19,7 @@ sh install.sh
 You can also install directly from the release tag.
 
 ```sh
-git clone --branch v0.2.7 --depth 1 https://github.com/xiaobaaaa/gravrelay.git
+git clone --branch v0.2.8 --depth 1 https://github.com/xiaobaaaa/gravrelay.git
 cd gravrelay
 sh install.sh
 ```
@@ -56,7 +56,7 @@ Run `sh install.sh doctor` to check the signed Antigravity build, local runtime 
 
 The remote CLI needs its own working connection to Google services. Its service can use a proxy already configured on the remote machine. A proxy forwarded from the Mac would stop working when the Mac disconnects, so the CLI connection does not create a reverse Mac proxy tunnel.
 
-The CLI manages its own updates. The bridge reuses a running service on reconnect and does not restart active work to apply an update.
+Connections shows the running, installed, and latest official CLI versions. The bridge checks when a host connects and caches the official manifest for six hours. **Check CLI** refreshes it; **Update CLI** verifies Google's SHA-512 release package and atomically installs it while preserving the running daemon and a private binary backup. **Restart CLI** applies the installed version only after explicit confirmation and two idle checks. Finish active tasks first; scheduled timers may need to be resumed. A normal reconnect reuses the service and never restarts it just to update.
 
 ## Update or disable
 

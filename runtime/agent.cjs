@@ -259,11 +259,41 @@ async function disconnectHost(host) {
 
 let checkingConnections = false;
 
+const cliChecks = new Map();
+async function inspectCLI(host, operation = "check") {
+  if (!configuredHosts().some(record => record.host === host && record.enabled))
+    throw new UserFacingError("Connect the SSH host before checking its CLI.");
+  if (cliChecks.has(host)) {
+    const pending = cliChecks.get(host);
+    if (pending.operation === operation && ["check", "refresh"].includes(operation)) return pending.promise;
+    throw new UserFacingError("A CLI operation is already running. Wait for it to finish, then retry.");
+  }
+  const promise = run(python, [path.join(__dirname, "cli-updates.py"), host, operation], {
+    timeout: 260000, maxBuffer: 64 * 1024,
+  }).then(({stdout}) => {
+    const result = JSON.parse(stdout);
+    if (result.ok !== true) throw new UserFacingError(result.message || "The CLI operation failed.");
+    return result.status;
+  }).catch(error => {
+    if (error instanceof UserFacingError) throw error;
+    throw new UserFacingError("The CLI operation failed. Check the host network and service status before trying again.");
+  }).finally(() => cliChecks.delete(host));
+  cliChecks.set(host, {operation, promise});
+  return promise;
+}
+
 async function maintainConnections() {
   if (stop || checkingConnections) return;
   checkingConnections = true;
   try {
     await Promise.all(configuredHosts().filter(record => record.enabled).map(async ({ host }) => {
+      const update = jsonFile(path.join(legacy, host, "cli-update.json"));
+      const checked = update?.checkedAt ? update.checkedAt * 1000 : 0;
+      const checkState = workspaceState(host);
+      if (!cliChecks.has(host) && Date.now() - Math.max(checked, checkState.lastCLICheck || 0) > 6 * 3600000) {
+        checkState.lastCLICheck = Date.now();
+        void inspectCLI(host).catch(() => {});
+      }
       if (projects().some(project => project.host === host)) {
         void warmWorkspace(host);
         return;
@@ -521,6 +551,10 @@ async function manageWorkspace(host, message) {
 async function dispatch(message) {
   const { action, host, path: directory } = message;
   const records = configuredHosts();
+  if (action === "cliUpdate") {
+    if (!["refresh", "update", "restart"].includes(message.operation)) throw new UserFacingError("Invalid CLI operation.");
+    return inspectCLI(host, message.operation);
+  }
   if (action === "snapshot") {
     const list = records.map(item => {
       const transport = transportState(item.host);
@@ -528,7 +562,9 @@ async function dispatch(message) {
       const status = hasProjects
         ? transport?.state === "connected" ? "connected" : ["connecting", "prepared"].includes(transport?.state) ? "connecting" : "failed"
         : masters.get(item.host)?.status ?? "connecting";
-      return { host: item.host, enabled: item.enabled, status: item.enabled ? status : "disconnected", error: transport?.error ?? null };
+      const cli = jsonFile(path.join(legacy, item.host, "cli-update.json"));
+      return { host: item.host, enabled: item.enabled, status: item.enabled ? status : "disconnected", error: transport?.error ?? null,
+        cli, cliBusy: cliChecks.has(item.host), cliOperation: cliChecks.get(item.host)?.operation };
     });
     const connected = new Set(list.filter(item => item.status === "connected").map(item => item.host));
     const saved = projects().map(project => {
