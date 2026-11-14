@@ -12,7 +12,7 @@ spec.loader.exec_module(installer)
 
 class ApplicationCompatibilityTests(unittest.TestCase):
     def test_reviewed_versions_still_require_the_original_google_signature(self):
-        for version in ('2.29.0','2.31.0','2.31.2'):
+        for version in ('2.29.0','2.31.0','2.31.2','2.32.1'):
             with patch.object(installer,'app_version',return_value=version), patch.object(
                     installer,'command',return_value=SimpleNamespace(returncode=0)) as command:
                 installer.verify_app(Path('/fixture/Antigravity.app'))

@@ -2,13 +2,13 @@
 
 GravRelay adds SSH workspaces to the existing Antigravity Projects sidebar on macOS. Select a remote folder, then use its projects and conversations from the same app window. Enabled hosts connect automatically when the app starts and retry after a disconnection.
 
-This release works with the signed Google Antigravity **2.29.0, 2.31.0, or 2.31.2** app and the official **Antigravity CLI 1.5.3** on Linux. It uses Antigravity's local development interface, so it is a version-specific add-on outside the official plugin system.
+This release works with the signed Google Antigravity **2.29.0, 2.31.0, 2.31.2, or 2.32.1** app and the official **Antigravity CLI 1.5.3** on Linux. It uses Antigravity's local development interface, so it is a version-specific add-on outside the official plugin system.
 
 Upgrading from 0.1.x: finish the old backend's tasks and follow [the migration steps](#migrate-an-older-gravrelay-workspace) before switching to the CLI profile. The original data is preserved.
 
 ## Install
 
-You need Antigravity 2.29.0, 2.31.0, or 2.31.2, Node.js 22 or newer, and Python 3.9 or newer on your Mac. The remote host needs Linux with systemd user services, Bash, Python 3, OpenSSH with local forwarding, OpenSSL, and the official Antigravity CLI. WSL with systemd is supported.
+You need Antigravity 2.29.0, 2.31.0, 2.31.2, or 2.32.1, Node.js 22 or newer, and Python 3.9 or newer on your Mac. The remote host needs Linux with systemd user services, Bash, Python 3, OpenSSH with local forwarding, OpenSSL, and the official Antigravity CLI. WSL with systemd is supported.
 
 Download and extract the [release ZIP](https://github.com/xiaobaaaa/gravrelay/releases/latest), then run this from the extracted folder in Terminal.
 
@@ -19,7 +19,7 @@ sh install.sh
 You can also install directly from the release tag.
 
 ```sh
-git clone --branch v0.2.6 --depth 1 https://github.com/xiaobaaaa/gravrelay.git
+git clone --branch v0.2.7 --depth 1 https://github.com/xiaobaaaa/gravrelay.git
 cd gravrelay
 sh install.sh
 ```
