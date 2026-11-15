@@ -2,7 +2,7 @@
 
 GravRelay adds SSH workspaces to the existing Antigravity Projects sidebar on macOS. Select a remote folder, then use its projects and conversations from the same app window. Enabled hosts connect automatically when the app starts and retry after a disconnection.
 
-This release works with the signed Google Antigravity **2.29.0, 2.31.0, 2.31.2, or 2.32.1** app and the official **Antigravity CLI 1.5.3** on Linux. It uses Antigravity's local development interface, so it is a version-specific add-on outside the official plugin system.
+This release supports the signed Google Antigravity **2.29.0, 2.31.0, 2.31.2, or 2.32.1** app. The latest native-panel integration was verified with **Antigravity 2.32.1** and the official **Antigravity CLI 1.5.8** on Linux. It uses Antigravity's local development interface, so it is a version-specific add-on outside the official plugin system.
 
 Upgrading from 0.1.x: finish the old backend's tasks and follow [the migration steps](#migrate-an-older-gravrelay-workspace) before switching to the CLI profile. The original data is preserved.
 
@@ -59,6 +59,8 @@ The remote CLI needs its own working connection to Google services. Its service 
 Connections shows the running, installed, and latest official CLI versions. The bridge checks when a host connects and caches the official manifest for six hours. **Check CLI** refreshes it; **Update CLI** verifies Google's SHA-512 release package and atomically installs it while preserving the running daemon and a private binary backup. **Restart CLI** applies the installed version only after explicit confirmation and two idle checks. Finish active tasks first; scheduled timers may need to be resumed. A normal reconnect reuses the service and never restarts it just to update.
 
 SSH and local projects use the same native sidebar scroll area and scrollbar. Only the Projects heading stays pinned; the SSH rows scroll normally so local projects remain reachable even when many remote conversations are expanded.
+
+On Antigravity 2.32.1, SSH workspaces also adapt the app's native terminal, built-in browser, and split-view controls. The terminal uses the remote CLI's PTYs. The browser uses a private browser profile on the SSH host and a separate owned SSH forward; it does not take over an existing desktop browser. These panel adapters are enabled only when the matching native capabilities are available. See the [release notes](CHANGELOG.md) for this version's changes.
 
 ## Update or disable
 

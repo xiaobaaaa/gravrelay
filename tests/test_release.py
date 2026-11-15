@@ -4,6 +4,7 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import unittest
@@ -23,6 +24,34 @@ def load(name, file):
 
 builder = load('release_builder', 'tools/build_release.py')
 publisher = load('release_publisher', 'tools/publish_release.py')
+installer = load('release_installer', 'install.py')
+
+
+class RuntimeInstallationTests(unittest.TestCase):
+    def test_staged_release_is_self_contained_for_sidebar_and_native_panels(self):
+        # Exercise the actual release inventory in an empty home, without
+        # touching launchd, an app profile, SSH, or a running remote service.
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = installer.runtime_path(Path(temporary))
+            installer.stage_runtime(destination)
+            installed = {file.name for file in destination.iterdir()}
+            for file in destination.iterdir():
+                if file.suffix not in ('.js', '.cjs'):
+                    continue
+                for dependency in re.findall(r'require\([\"\']\./([^\"\']+)[\"\']\)', file.read_text()):
+                    self.assertIn(dependency, installed, (file.name, dependency))
+            # This helper is read at runtime rather than imported by Node.
+            self.assertIn('browser_remote.py', installed)
+            modules = ['sidebar-scroll.cjs', 'features.cjs', 'layout.cjs',
+                       'terminal.cjs', 'browser.cjs']
+            subprocess.run(['node', '-e',
+                            "for (const file of process.argv.slice(1)) { "
+                            "if (typeof require(file) !== 'function') throw Error(file); }",
+                            *[str(destination / name) for name in modules]], check=True)
+            agent = (destination / 'agent.cjs').read_text()
+            self.assertIn('installSidebarScrolling.toString()', agent)
+            self.assertIn('__gravRelaySidebarScrolling?.remove?.()',
+                          (destination / 'panel.js').read_text())
 
 
 class ReleaseFixture(unittest.TestCase):

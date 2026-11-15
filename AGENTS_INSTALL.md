@@ -11,7 +11,7 @@ These steps are for an agent that the user has asked to install GravRelay on the
 Before upgrading an older installation, inspect the remote standalone profile and run tools/migrate_legacy.py in plan mode. Preserve its running tasks and data. Complete the documented migration before enabling the new CLI workspace.
 
 7. The coding backend is the official CLI systemd user service. Ensure the host has its own working Google/proxy connection. Do not introduce a Mac reverse proxy dependency. Preserve any existing CLI jobs; if its already-running service needs the private connection configuration, arrange its one-time restart after those jobs finish.
-8. Once the host connects, use **Projects → New SSH Project** to choose a remote folder. Keep the native Projects workflow and verify a real remote command. Do not silently replace or discard an older GravRelay profile or interrupt its running tasks.
+8. Once the host connects, use **Projects → Create Project → SSH** (or **New SSH Project** on older app menus) to choose a remote folder. Keep the native Projects workflow and verify a real remote command. Expand several SSH projects and scroll the sidebar to confirm that local projects are still reachable in the same scroll area. Do not silently replace or discard an older GravRelay profile or interrupt its running tasks.
 
 Run the installer as the desktop user. Existing host settings, SSH configuration and workspace data stay separate from the release package. Use `sh install.sh uninstall` to disable the bridge.
 
