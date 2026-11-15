@@ -15,7 +15,7 @@
   const pending = new Map();
   const remoteHost = globalThis.__agyConnectionsRemoteHost || "";
   let sequence = Date.now(), snapshot, disposed = false, refreshPending = false;
-  let settings, sidebar;
+  let settings, sidebar, projectDialog;
   let scheduled = false;
 
   const node = (tag, text = "", className = "") => {
@@ -39,7 +39,7 @@
       const timer = setTimeout(() => {
         pending.delete(id);
         reject(new Error("The SSH request timed out."));
-      }, action === "cliUpdate" ? 270000 : action === "open" || action === "create" ? 90000 : action === "manage" ? 60000 : 45000);
+      }, action === "cliUpdate" ? 270000 : action === "browser" && args.operation === "acquire" ? 90000 : action === "open" || action === "create" ? 90000 : action === "manage" ? 60000 : 45000);
       pending.set(id, { resolve, reject, timer });
       globalThis.__agyConnectionsBridge(JSON.stringify({ id, action, ...args }));
     });
@@ -1108,6 +1108,8 @@
     selection = { project: project.id, conversation, operation };
     drawSidebar();
     applySelection(project.workspace, true);
+    const frame = workspaceFrames.get(project.host);
+    if (frame && displayedWorkspace === frame) frame.element.contentWindow.focus();
   }
 
   function showWorkspace(result) {
@@ -1320,6 +1322,46 @@
     drawHosts();
   }
 
+  function mountProjectDialog() {
+    const native = Array.from(document.querySelectorAll('.agy-dialog[role="dialog"]')).find(dialog => {
+      const heading = dialog.querySelector('h2');
+      return dialog.querySelector('[data-testid="project-add-folder-button"]') ||
+        heading?.textContent.trim() === "Create Project";
+    });
+    if (!native) {
+      projectDialog?.item.remove();
+      projectDialog = null;
+      return;
+    }
+    if (projectDialog?.native === native && projectDialog.item.isConnected) return;
+    projectDialog?.item.remove();
+    const group = Array.from(native.querySelectorAll('[role="group"]')).find(group =>
+      group.querySelectorAll('button[aria-pressed]').length >= 2);
+    const exemplar = group?.querySelector('button');
+    const close = native.querySelector('button[aria-label="Close"]');
+    if (!group || !exemplar || !close) return;
+    const item = button("", () => {
+      close.click();
+      openFolderPicker(document.querySelector(plusSelector));
+    }, exemplar.className);
+    item.setAttribute("data-gravrelay-ssh-project-source", "");
+    item.setAttribute("aria-label", "New SSH Project");
+    item.setAttribute("data-testid", "gravrelay-new-ssh-project");
+    const icon = exemplar.querySelector("svg")?.cloneNode(true) ?? sourceIcon("", true);
+    icon.setAttribute("aria-hidden", "true");
+    item.append(icon, node("span", "SSH"));
+    group.append(item);
+    projectDialog = {
+      native, item,
+      draw() {
+        item.disabled = connectedHosts().length === 0;
+        item.title = item.disabled ? "Connect an SSH host in Settings → Connections." : "New SSH Project";
+      },
+    };
+    projectDialog.draw();
+    refresh().catch(() => {});
+  }
+
   function mountProjectMenu() {
     const plus = document.querySelector(plusSelector);
     const id = plus?.getAttribute("aria-controls");
@@ -1359,12 +1401,34 @@
 
   document.addEventListener("click", openNativeProject, true);
   document.addEventListener("pointerdown", closeActionsOutside, true);
+  async function receiveBrowserRequest(event) {
+    const message = event.data;
+    if (disposed || message?.type !== "agy-ssh-browser-request" ||
+        typeof message.host !== "string" || !Number.isSafeInteger(message.id)) return;
+    const frame = workspaceFrames.get(message.host);
+    if (!frame || event.source !== frame.element.contentWindow || event.origin !== frame.origin ||
+        !snapshot?.hosts?.some(item => item.host === message.host && item.enabled)) return;
+    const {id, host} = message;
+    const fields = ["operation", "tabKey", "initialUrl", "boundsCss", "afterSequence", "url", "command", "params", "text", "size"];
+    const args = Object.fromEntries(fields.filter(key => Object.hasOwn(message, key)).map(key => [key, message[key]]));
+    if (JSON.stringify(args).length > 220000) return;
+    try {
+      const data = await request("browser", {host, ...args});
+      if (!disposed && workspaceFrames.get(host) === frame)
+        frame.element.contentWindow.postMessage({type:"agy-ssh-browser-response",host,id,ok:true,data},frame.origin);
+    } catch (error) {
+      if (!disposed && workspaceFrames.get(host) === frame)
+        frame.element.contentWindow.postMessage({type:"agy-ssh-browser-response",host,id,ok:false,error:error.message},frame.origin);
+    }
+  }
+  window.addEventListener("message", receiveBrowserRequest);
   window.addEventListener("message", receiveWorkspaceReady);
 
   function render() {
     settings?.view.draw();
     drawSidebar();
     projectMenu?.draw();
+    projectDialog?.draw();
     folderPicker?.drawHosts();
     warmFrames();
   }
@@ -1374,10 +1438,12 @@
     mountSettings();
     mountSidebar();
     mountProjectMenu();
+    mountProjectDialog();
     warmFrames();
   }
   const observer = new MutationObserver(() => {
     if (scheduled) return;
+    mountProjectDialog();
     const native = document.querySelector('.settings-modal-container[role="dialog"][aria-label="Settings"]');
     const heading = document.querySelector(plusSelector)?.closest('[data-testid="section-header"]');
     const plus = document.querySelector(plusSelector);
@@ -1396,6 +1462,7 @@
   const tick = setInterval(() => refresh().catch(() => {}), 2600);
   globalThis.__agyConnectionsRemove = () => {
     disposed = true;
+    window.removeEventListener("message", receiveBrowserRequest);
     clearInterval(tick);
     observer.disconnect();
     themeObserver.disconnect();
@@ -1404,6 +1471,7 @@
     sidebar?.remove();
     localSelectionStyle.remove();
     projectMenu?.extension.remove();
+    projectDialog?.item.remove();
     folderPicker?.dialog.close();
     hideWorkspace();
     for (const frame of workspaceFrames.values()) frame.element.remove();

@@ -14,6 +14,12 @@ const {supportedAppVersions, isAppVersionSupported, installCompatibilityNotice} 
 const installCLIFrontend = require("./cli-frontend.cjs");
 const installNativePermissions = require("./permissions.cjs");
 const installRemoteFiles = require("./files.cjs");
+const installNativeTerminal = require("./terminal.cjs");
+const installNativeFeatures = require("./features.cjs");
+const installNativeLayout = require("./layout.cjs");
+const installRemoteBrowser = require("./browser.cjs");
+const {createBrowserBridge} = require("./browser-bridge.cjs");
+const {createBrowserEndpoints} = require("./browser-endpoint.cjs");
 const original = process.env.AGY_SSH_APP || "/Applications/Antigravity.app";
 const python = process.env.AGY_SSH_PYTHON || "/usr/bin/python3";
 const binary = original + "/Contents/MacOS/Antigravity";
@@ -40,7 +46,7 @@ const selectedProjects = new Map();
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 class UserFacingError extends Error {}
 let hostsCache, savedProjects, savedHosts, stop = false;
-let frontendOrigin = "", appPID = null, catalogTimer;
+let frontendOrigin = "", appPID = null, catalogTimer, currentAppVersion;
 function cacheCatalog() {
   if (catalogTimer) return;
   catalogTimer = setTimeout(() => {
@@ -176,6 +182,27 @@ const sshOptions = ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
   "-o", "ConnectTimeout=20", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3",
   "-o", "ForwardAgent=no", "-o", "ForwardX11=no", "-o", "PermitLocalCommand=no",
   "-o", "ClearAllForwardings=yes"];
+
+// This channel owns only its browser forward. It does not replace or stop the
+// CLI transport, the SSH control master, or the remote browser service.
+const shellQuote = value => "'" + String(value).replace(/'/g, "'\\''") + "'";
+const browserEndpoints = createBrowserEndpoints({
+  async runRemote(host, source) {
+    const {stdout} = await run(ssh, [...sshConfigFor(host), ...sshOptions, host,
+      "python3 -c " + shellQuote(source)], {timeout:65000,maxBuffer:65536});
+    return stdout;
+  },
+  openForward(host, remotePort, localPort) {
+    return spawn(ssh, [...sshConfigFor(host), "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
+      "-o", "ConnectTimeout=15", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3",
+      "-o", "ForwardAgent=no", "-o", "ForwardX11=no", "-o", "PermitLocalCommand=no",
+      "-o", "ExitOnForwardFailure=yes", "-o", "ControlMaster=no", "-S", "none",
+      "-o", "ClearAllForwardings=no", "-N", "-L",
+      "127.0.0.1:" + localPort + ":127.0.0.1:" + remotePort, host], {stdio:"ignore"});
+  },
+});
+const browserBridge = createBrowserBridge({ensureEndpoint:host=>browserEndpoints.ensure(host),
+  stateFile:path.join(moduleData, "browser-targets.json")});
 
 async function checkMaster(host) {
   try {
@@ -661,6 +688,11 @@ async function dispatch(message) {
     }
     return {};
   }
+  if (action === "browser") {
+    if (!record.enabled) throw new UserFacingError("Connect the SSH host before opening its browser.");
+    try { return await browserBridge.handle(host, message); }
+    catch (error) { throw new UserFacingError(String(error?.message || "The SSH browser is unavailable.").slice(0, 500)); }
+  }
   if (action === "browse") return browse(host, directory);
   if (action === "manage") return manageWorkspace(host, message);
   if (action === "create") {
@@ -939,8 +971,12 @@ async function styleWorkspaceFrame(url, parentOrigins, contextId) {
     await client.ready;
     const result = await client.send("Runtime.evaluate", { ...(contextId ? { contextId } : {}), returnByValue: true, expression: `(() => {
       if (window === window.top || !document.head) return false;
+      (${installNativeFeatures.toString()})({appVersion:${JSON.stringify(currentAppVersion)},factorySymbol:"bna"});
       (${installNativePermissions.toString()})();
       (${installRemoteFiles.toString()})();
+      (${installNativeLayout.toString()})();
+      (${installNativeTerminal.toString()})();
+      (${installRemoteBrowser.toString()})();
       (${followWorkspaceTheme.toString()})(${JSON.stringify(parentOrigins)});
       (${installWorkspaceReadiness.toString()})(${JSON.stringify(parentOrigins)});
       (${followWorkspaceCatalog.toString()})(${JSON.stringify(parentOrigins)});
@@ -1156,6 +1192,7 @@ async function main() {
   appPID = parent.pid;
   const version = (await run("/usr/bin/plutil", ["-extract", "CFBundleShortVersionString", "raw",
     path.join(original, "Contents/Info.plist")], { timeout: 2500 })).stdout.trim();
+  currentAppVersion = version;
   const supported = isAppVersionSupported(compatibility, version);
   persist(path.join(moduleData, "compatibility-status.json"), {schema: 1, state: "checking",
     appVersion: version, supportedVersions: supportedAppVersions(compatibility), checkedAt: new Date().toISOString()});
@@ -1257,6 +1294,8 @@ async function main() {
     }
   } finally {
     clearInterval(connectionTimer);
+    browserBridge.close();
+    browserEndpoints.close();
     await Promise.allSettled([...attached.values()].map(entry => entry.remove()));
     await Promise.allSettled([...masters].filter(([, state]) => state.child).map(([host]) => disconnectHost(host)));
   }
