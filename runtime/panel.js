@@ -1461,6 +1461,7 @@
   observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["data-collapsed", "aria-expanded"] });
   const tick = setInterval(() => refresh().catch(() => {}), 2600);
   globalThis.__agyConnectionsRemove = () => {
+    globalThis.__gravRelaySidebarScrolling?.remove?.();
     disposed = true;
     window.removeEventListener("message", receiveBrowserRequest);
     clearInterval(tick);

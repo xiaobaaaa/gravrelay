@@ -14,6 +14,7 @@ const {supportedAppVersions, isAppVersionSupported, installCompatibilityNotice} 
 const installCLIFrontend = require("./cli-frontend.cjs");
 const installNativePermissions = require("./permissions.cjs");
 const installRemoteFiles = require("./files.cjs");
+const installSidebarScrolling = require("./sidebar-scroll.cjs");
 const installNativeTerminal = require("./terminal.cjs");
 const installNativeFeatures = require("./features.cjs");
 const installNativeLayout = require("./layout.cjs");
@@ -1113,7 +1114,7 @@ async function attach(url, allowedPorts) {
     if (generation !== expected) return;
     if (generation !== expected) return;
     context = executionContextId;
-    const source = fs.readFileSync(panelPath, "utf8");
+    const source = fs.readFileSync(panelPath, "utf8") + "\n(" + installSidebarScrolling.toString() + ")();";
     const evaluation = await client.send("Runtime.evaluate", {
       expression: "globalThis.__agyConnectionsRemoteHost = " + JSON.stringify(host) + ";\ndocument.getElementById(\"gravrelay-compatibility-notice\")?.remove();\n" + source,
       contextId: context,

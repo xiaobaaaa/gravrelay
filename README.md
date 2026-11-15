@@ -19,7 +19,7 @@ sh install.sh
 You can also install directly from the release tag.
 
 ```sh
-git clone --branch v0.2.10 --depth 1 https://github.com/xiaobaaaa/gravrelay.git
+git clone --branch v0.2.11 --depth 1 https://github.com/xiaobaaaa/gravrelay.git
 cd gravrelay
 sh install.sh
 ```
@@ -34,7 +34,7 @@ agy acp --login
 
 GravRelay configures a private local connection token and starts the official CLI background service when needed. An existing CLI service that predates this setup needs a one-time restart after its tasks finish. The app reports this instead of restarting active work.
 
-Once the host is connected, choose **Projects → New SSH Project**. Select the host and folder in the folder picker. Saved projects and conversations load automatically after their host connects. The remote CLI uses its own signed-in account and settings.
+Once the host is connected, choose **Projects → Create Project → SSH** (or **New SSH Project** on older app menus). Select the host and folder in the folder picker. Saved projects and conversations load automatically after their host connects. The remote CLI uses its own signed-in account and settings.
 
 The message box uses Antigravity's native permissions picker. It changes the SSH host's default preset, or the project's preset when that project has an override. Available options follow the remote host's sandbox support. GravRelay does not change the selected preset during installation, and does not enable experimental conversation-scoped overrides that the CLI backend rejects.
 
@@ -57,6 +57,8 @@ Run `sh install.sh doctor` to check the signed Antigravity build, local runtime 
 The remote CLI needs its own working connection to Google services. Its service can use a proxy already configured on the remote machine. A proxy forwarded from the Mac would stop working when the Mac disconnects, so the CLI connection does not create a reverse Mac proxy tunnel.
 
 Connections shows the running, installed, and latest official CLI versions. The bridge checks when a host connects and caches the official manifest for six hours. **Check CLI** refreshes it; **Update CLI** verifies Google's SHA-512 release package and atomically installs it while preserving the running daemon and a private binary backup. **Restart CLI** applies the installed version only after explicit confirmation and two idle checks. Finish active tasks first; scheduled timers may need to be resumed. A normal reconnect reuses the service and never restarts it just to update.
+
+SSH and local projects use the same native sidebar scroll area and scrollbar. Only the Projects heading stays pinned; the SSH rows scroll normally so local projects remain reachable even when many remote conversations are expanded.
 
 ## Update or disable
 
