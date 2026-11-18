@@ -2,13 +2,13 @@
 
 GravRelay adds SSH workspaces to the existing Antigravity Projects sidebar on macOS. Select a remote folder, then use its projects and conversations from the same app window. Enabled hosts connect automatically when the app starts and retry after a disconnection.
 
-This release supports the signed Google Antigravity **2.29.0, 2.31.0, 2.31.2, or 2.32.1** app. The latest native-panel integration was verified with **Antigravity 2.32.1** and the official **Antigravity CLI 1.5.8** on Linux. It uses Antigravity's local development interface, so it is a version-specific add-on outside the official plugin system.
+This release supports the signed Google Antigravity **2.29.0, 2.31.0, 2.31.2, 2.32.1, or 2.32.2** app. The latest native-panel integration was verified with **Antigravity 2.32.1** and the official **Antigravity CLI 1.5.8** on Linux. It uses Antigravity's local development interface, so it is a version-specific add-on outside the official plugin system.
 
 Upgrading from 0.1.x: finish the old backend's tasks and follow [the migration steps](#migrate-an-older-gravrelay-workspace) before switching to the CLI profile. The original data is preserved.
 
 ## Install
 
-You need Antigravity 2.29.0, 2.31.0, 2.31.2, or 2.32.1, Node.js 22 or newer, and Python 3.9 or newer on your Mac. The remote host needs Linux with systemd user services, Bash, Python 3, OpenSSH with local forwarding, OpenSSL, and the official Antigravity CLI. The built-in browser panel also needs Google Chrome or Chromium installed on the remote host. WSL with systemd is supported.
+You need Antigravity 2.29.0, 2.31.0, 2.31.2, 2.32.1, or 2.32.2, Node.js 22 or newer, and Python 3.9 or newer on your Mac. The remote host needs Linux with systemd user services, Bash, Python 3, OpenSSH with local forwarding, OpenSSL, and the official Antigravity CLI. The built-in browser panel also needs Google Chrome or Chromium installed on the remote host. WSL with systemd is supported.
 
 Download and extract the [release ZIP](https://github.com/xiaobaaaa/gravrelay/releases/latest), then run this from the extracted folder in Terminal.
 
@@ -19,7 +19,7 @@ sh install.sh
 You can also install directly from the release tag.
 
 ```sh
-git clone --branch v0.2.11 --depth 1 https://github.com/xiaobaaaa/gravrelay.git
+git clone --branch v0.2.12 --depth 1 https://github.com/xiaobaaaa/gravrelay.git
 cd gravrelay
 sh install.sh
 ```
@@ -60,7 +60,7 @@ Connections shows the running, installed, and latest official CLI versions. The 
 
 SSH and local projects use the same native sidebar scroll area and scrollbar. Only the Projects heading stays pinned; the SSH rows scroll normally so local projects remain reachable even when many remote conversations are expanded.
 
-On Antigravity 2.32.1, SSH workspaces also adapt the app's native terminal, built-in browser, and split-view controls. The terminal uses the remote CLI's PTYs. The browser uses a verified loopback Chrome debugging endpoint on the SSH host through a separate owned SSH forward. When no compatible endpoint is available, GravRelay starts a headless browser with its own private profile. These panel adapters are enabled only when the matching native capabilities are available. See the [release notes](CHANGELOG.md) for this version's changes.
+On Antigravity 2.32.1 and 2.32.2, SSH workspaces also adapt the app's native terminal, built-in browser, and split-view controls. The terminal uses the remote CLI's PTYs. The browser uses a verified loopback Chrome debugging endpoint on the SSH host through a separate owned SSH forward. When no compatible endpoint is available, GravRelay starts a headless browser with its own private profile. These panel adapters are enabled only when the matching native capabilities are available. See the [release notes](CHANGELOG.md) for this version's changes.
 
 ## Update or disable
 

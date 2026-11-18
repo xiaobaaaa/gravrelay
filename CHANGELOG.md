@@ -1,5 +1,9 @@
 # Release notes
 
+## 0.2.12
+
+- Support the signed Antigravity 2.32.2 macOS app and its native SSH workspace panels.
+
 ## 0.2.11
 
 - Fix the Projects sidebar when many SSH conversations are expanded. SSH and local projects share Antigravity's native scroll area; only the Projects heading stays pinned, so local projects remain reachable.

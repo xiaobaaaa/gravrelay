@@ -2,7 +2,7 @@ function installNativeFeatures(options = {}) {
   if (window === window.top) return;
   const host = new URL(location.href).searchParams.get('__gravrelay_ssh');
   if (!host || globalThis.__gravRelayCLIFrontend?.host !== host) return;
-  const symbols = { '2.32.1': 'bna' };
+  const symbols = { '2.32.1': 'bna', '2.32.2': 'bna' };
   const symbol = symbols[options.appVersion];
   if (!symbol || options.factorySymbol !== symbol) return;
   if (globalThis.__gravRelayNativeFeatures?.version === 1) return;
